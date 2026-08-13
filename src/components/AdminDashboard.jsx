@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
 import { collection, addDoc, getDocs, query, where, doc, setDoc, updateDoc, deleteDoc } from 'firebase/firestore';
-import { db } from '../services/firebase';
-import { createUserWithEmailAndPassword, sendPasswordResetEmail } from 'firebase/auth';
-import { auth } from '../services/firebase';
+import { initializeApp, getApps } from 'firebase/app';
+import { createUserWithEmailAndPassword, getAuth, sendPasswordResetEmail } from 'firebase/auth';
+import { auth, db, firebaseConfig } from '../services/firebase';
 import { useAuth } from '../hooks/useAuth';
 import EntryListForAdmin from './EntryListForAdmin';
+import ChangePasswordForm from './ChangePasswordForm';
 
 const AdminDashboard = () => {
   const [activeTab, setActiveTab] = useState('entries');
@@ -24,10 +25,78 @@ const AdminDashboard = () => {
   const { logout, currentUser } = useAuth();
 
 
+  const [existingTrainers, setExistingTrainers] = useState([]);
+  const [trainerSearchTerm, setTrainerSearchTerm] = useState('');
+
   // Load data from Firestore
   useEffect(() => {
     fetchProjects();
+    fetchExistingTrainers();
   }, []);
+
+  const fetchExistingTrainers = async () => {
+    try {
+      const q = query(collection(db, 'users'), where('role', '==', 'trainer'));
+      const querySnapshot = await getDocs(q);
+      
+      // Also fetch all entries to calculate entry counts per trainer and capture legacy/entry-only trainers
+      const entriesSnapshot = await getDocs(collection(db, 'entries'));
+      const entryCounts = {};
+      const entryTrainersMap = {};
+
+      entriesSnapshot.forEach((doc) => {
+        const data = doc.data();
+        const tid = data.trainerId || data.trainerEmail;
+        if (tid) {
+          entryCounts[tid] = (entryCounts[tid] || 0) + 1;
+          if (data.trainerEmail && !entryTrainersMap[data.trainerEmail.toLowerCase()]) {
+            entryTrainersMap[data.trainerEmail.toLowerCase()] = {
+              id: data.trainerId || data.trainerEmail,
+              email: data.trainerEmail,
+              name: data.trainerName || '',
+              role: 'trainer'
+            };
+          }
+        }
+      });
+
+      const trainersMap = {};
+
+      // 1. Add trainers registered in users collection
+      querySnapshot.forEach((doc) => {
+        const data = doc.data();
+        const trainerId = doc.id;
+        const uid = data.uid || trainerId;
+        const emailKey = (data.email || '').toLowerCase();
+        
+        const countByDoc = entryCounts[trainerId] || 0;
+        const countByUid = uid !== trainerId ? (entryCounts[uid] || 0) : 0;
+        const countByEmail = emailKey ? (entryCounts[emailKey] || 0) : 0;
+        const count = countByDoc + countByUid + countByEmail;
+
+        const record = { id: doc.id, ...data, entryCount: count };
+        trainersMap[doc.id] = record;
+        if (emailKey) trainersMap[emailKey] = record;
+      });
+
+      // 2. Add trainers found in entries collection who might not be in users collection
+      Object.keys(entryTrainersMap).forEach((emailKey) => {
+        if (!trainersMap[emailKey]) {
+          const info = entryTrainersMap[emailKey];
+          const count = entryCounts[info.id] || entryCounts[emailKey] || 0;
+          const record = { ...info, entryCount: count };
+          trainersMap[emailKey] = record;
+        }
+      });
+
+      // Convert map values to array (removing duplicate keys mapping to same record)
+      const uniqueTrainers = Array.from(new Set(Object.values(trainersMap)));
+      uniqueTrainers.sort((a, b) => ((a.name || a.email) || '').toString().localeCompare(((b.name || b.email) || '').toString()));
+      setExistingTrainers(uniqueTrainers);
+    } catch (error) {
+      console.error('Error fetching existing trainers:', error);
+    }
+  };
 
   useEffect(() => {
     if (selectedProject) {
@@ -97,9 +166,15 @@ const AdminDashboard = () => {
     setLoading(true);
     
     try {
-      // Create auth user with a temporary password
-      const password = Math.random().toString(36).slice(-8);
-      const userCredential = await createUserWithEmailAndPassword(auth, trainerEmail, password);
+      // Create a secondary Firebase app instance so current admin auth state is preserved
+      let secondaryApp = getApps().find(app => app.name === 'SecondaryAuthApp');
+      if (!secondaryApp) {
+        secondaryApp = initializeApp(firebaseConfig, 'SecondaryAuthApp');
+      }
+      const secondaryAuth = getAuth(secondaryApp);
+
+      const defaultPassword = 'password123';
+      const userCredential = await createUserWithEmailAndPassword(secondaryAuth, trainerEmail, defaultPassword);
       
       // Add to users collection
       await setDoc(doc(db, 'users', userCredential.user.uid), {
@@ -110,14 +185,15 @@ const AdminDashboard = () => {
         createdAt: new Date()
       });
       
-      // Send password reset email
-      await sendPasswordResetEmail(auth, trainerEmail);
-      
-      setMessage(`Trainer account created successfully! A password reset link has been sent to ${trainerEmail}`);
+      // Sign out from secondary instance immediately
+      await secondaryAuth.signOut();
+
+      setMessage(`Trainer account created successfully! Default password is set to: password123`);
       
       // Reset form
       setTrainerEmail('');
       setTrainerName('');
+      fetchExistingTrainers();
     } catch (error) {
       setMessage('Error creating trainer: ' + error.message);
     }
@@ -473,12 +549,27 @@ const AdminDashboard = () => {
               </svg>
               Manage Projects
             </button>
+            <button
+              onClick={() => setActiveTab('changePassword')}
+              className={`py-2 px-4 sm:py-3 sm:px-6 rounded-lg font-medium text-sm flex items-center transition-all duration-200 ${
+                activeTab === 'changePassword'
+                  ? 'bg-blue-100 text-blue-700 shadow-inner'
+                  : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              <svg className={`w-5 h-5 mr-2 ${activeTab === 'changePassword' ? 'text-blue-600' : 'text-gray-400'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+              </svg>
+              Change Password
+            </button>
           </nav>
         </div>
 
         {/* Tab Content */}
         <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6">
           {activeTab === 'entries' && <EntryListForAdmin />}
+          
+          {activeTab === 'changePassword' && <ChangePasswordForm />}
           
           {activeTab === 'addTrainer' && (
             <div className="space-y-6">
@@ -568,6 +659,103 @@ const AdminDashboard = () => {
                     </button>
                   </form>
                 </div>
+              </div>
+
+              {/* Existing Trainers List */}
+              <div className="mt-8 bg-gray-50 p-6 rounded-xl border border-gray-200">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
+                  <h3 className="text-lg font-medium text-gray-800 flex items-center">
+                    <svg className="w-5 h-5 mr-2 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+                    </svg>
+                    Existing Trainers ({existingTrainers.length})
+                  </h3>
+
+                  {/* Search Bar */}
+                  <div className="relative w-full sm:w-72">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                      <svg className="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                      </svg>
+                    </div>
+                    <input
+                      type="text"
+                      value={trainerSearchTerm}
+                      onChange={(e) => setTrainerSearchTerm(e.target.value)}
+                      placeholder="Search by name or email..."
+                      className="w-full pl-9 pr-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white transition-colors"
+                    />
+                  </div>
+                </div>
+
+                {(() => {
+                  const filteredTrainers = existingTrainers.filter((trainer) => {
+                    if (!trainerSearchTerm.trim()) return true;
+                    const term = trainerSearchTerm.toLowerCase();
+                    const nameMatch = (trainer.name || '').toLowerCase().includes(term);
+                    const emailMatch = (trainer.email || '').toLowerCase().includes(term);
+                    return nameMatch || emailMatch;
+                  });
+
+                  if (existingTrainers.length === 0) {
+                    return <p className="text-sm text-gray-500 italic">No existing trainers found.</p>;
+                  }
+
+                  if (filteredTrainers.length === 0) {
+                    return (
+                      <div className="bg-white rounded-lg border border-gray-200 p-8 text-center">
+                        <svg className="w-12 h-12 mx-auto text-gray-400 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                        </svg>
+                        <p className="text-base font-medium text-gray-700">No trainers found</p>
+                        <p className="text-sm text-gray-500 mt-1">
+                          No results matching "<span className="font-semibold text-gray-700">{trainerSearchTerm}</span>". Try searching with a different name or email.
+                        </p>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div>
+                      {trainerSearchTerm.trim() && (
+                        <p className="text-xs text-gray-500 mb-2 font-medium">
+                          Showing {filteredTrainers.length} of {existingTrainers.length} trainers
+                        </p>
+                      )}
+                      <div className="overflow-x-auto bg-white rounded-lg border border-gray-200 shadow-sm">
+                        <table className="min-w-full divide-y divide-gray-200">
+                          <thead className="bg-gray-100">
+                            <tr>
+                              <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">#</th>
+                              <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Trainer Name</th>
+                              <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Trainer Email</th>
+                              <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Total Entries</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-200">
+                            {filteredTrainers.map((trainer, index) => (
+                              <tr key={trainer.id || index} className="hover:bg-gray-50 transition-colors">
+                                <td className="px-4 py-3 text-sm text-gray-500">{index + 1}</td>
+                                <td className="px-4 py-3 text-sm font-medium text-gray-900 flex items-center space-x-2">
+                                  <span>{trainer.name || 'N/A'}</span>
+                                  {trainer.entryCount === 0 && (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300">
+                                      NEW
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="px-4 py-3 text-sm text-gray-600">{trainer.email || 'N/A'}</td>
+                                <td className="px-4 py-3 text-sm font-semibold text-blue-700">
+                                  {trainer.entryCount || 0} {trainer.entryCount === 1 ? 'entry' : 'entries'}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           )}

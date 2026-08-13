@@ -3,7 +3,7 @@ import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 
 // Your web app's Firebase configuration
-const firebaseConfig = {
+export const firebaseConfig = {
   apiKey: "AIzaSyDsx7vWi12fgOQWwnSNb12ltaueMvxO6dc",
   authDomain: "closure-report.firebaseapp.com",
   projectId: "closure-report",
