@@ -202,6 +202,26 @@ const AdminDashboard = () => {
     setTimeout(() => setMessage(''), 5000);
   };
 
+  const handleDeleteTrainer = async (trainer) => {
+    const nameOrEmail = trainer.name || trainer.email || 'this trainer';
+    const ok = window.confirm(`Are you sure you want to delete trainer "${nameOrEmail}"?`);
+    if (!ok) return;
+
+    setLoading(true);
+    try {
+      if (trainer.id) {
+        await deleteDoc(doc(db, 'users', trainer.id));
+      }
+      setMessage(`Trainer "${nameOrEmail}" deleted successfully.`);
+      fetchExistingTrainers();
+    } catch (error) {
+      console.error('Error deleting trainer:', error);
+      setMessage('Error deleting trainer: ' + (error.message || error));
+    }
+    setLoading(false);
+    setTimeout(() => setMessage(''), 3000);
+  };
+
   const handleCreateProject = async (e) => {
     e.preventDefault();
     if (!projectName) {
@@ -730,6 +750,7 @@ const AdminDashboard = () => {
                               <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Trainer Name</th>
                               <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Trainer Email</th>
                               <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Total Entries</th>
+                              <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wider">Actions</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-200">
@@ -747,6 +768,18 @@ const AdminDashboard = () => {
                                 <td className="px-4 py-3 text-sm text-gray-600">{trainer.email || 'N/A'}</td>
                                 <td className="px-4 py-3 text-sm font-semibold text-blue-700">
                                   {trainer.entryCount || 0} {trainer.entryCount === 1 ? 'entry' : 'entries'}
+                                </td>
+                                <td className="px-4 py-3 text-sm text-right">
+                                  <button
+                                    onClick={() => handleDeleteTrainer(trainer)}
+                                    title="Delete Trainer"
+                                    className="inline-flex items-center px-2.5 py-1 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-md transition-colors shadow-sm"
+                                  >
+                                    <svg className="w-3.5 h-3.5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                    </svg>
+                                    Delete
+                                  </button>
                                 </td>
                               </tr>
                             ))}
