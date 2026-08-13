@@ -166,29 +166,47 @@ const AdminDashboard = () => {
     setLoading(true);
     
     try {
-      // Create a secondary Firebase app instance so current admin auth state is preserved
-      let secondaryApp = getApps().find(app => app.name === 'SecondaryAuthApp');
-      if (!secondaryApp) {
-        secondaryApp = initializeApp(firebaseConfig, 'SecondaryAuthApp');
-      }
-      const secondaryAuth = getAuth(secondaryApp);
+      let uidToUse = null;
 
-      const defaultPassword = 'password123';
-      const userCredential = await createUserWithEmailAndPassword(secondaryAuth, trainerEmail, defaultPassword);
+      try {
+        // Create a secondary Firebase app instance so current admin auth state is preserved
+        let secondaryApp = getApps().find(app => app.name === 'SecondaryAuthApp');
+        if (!secondaryApp) {
+          secondaryApp = initializeApp(firebaseConfig, 'SecondaryAuthApp');
+        }
+        const secondaryAuth = getAuth(secondaryApp);
+
+        const defaultPassword = 'password123';
+        const userCredential = await createUserWithEmailAndPassword(secondaryAuth, trainerEmail, defaultPassword);
+        uidToUse = userCredential.user.uid;
+        
+        // Sign out from secondary instance immediately
+        await secondaryAuth.signOut();
+      } catch (authErr) {
+        if (authErr.code === 'auth/email-already-in-use') {
+          // If email exists in Firebase Auth, fetch existing user doc or use email as identifier
+          const qExist = query(collection(db, 'users'), where('email', '==', trainerEmail));
+          const snapExist = await getDocs(qExist);
+          if (!snapExist.empty) {
+            uidToUse = snapExist.docs[0].id;
+          } else {
+            uidToUse = trainerEmail;
+          }
+        } else {
+          throw authErr;
+        }
+      }
       
-      // Add to users collection
-      await setDoc(doc(db, 'users', userCredential.user.uid), {
-        uid: userCredential.user.uid,
+      // Add or update in users collection
+      await setDoc(doc(db, 'users', uidToUse), {
+        uid: uidToUse,
         email: trainerEmail,
         name: trainerName,
         role: 'trainer',
         createdAt: new Date()
-      });
+      }, { merge: true });
       
-      // Sign out from secondary instance immediately
-      await secondaryAuth.signOut();
-
-      setMessage(`Trainer account created successfully! Default password is set to: password123`);
+      setMessage(`Trainer account created/updated successfully! Default password is set to: password123`);
       
       // Reset form
       setTrainerEmail('');
