@@ -6,6 +6,7 @@ import { auth, db, firebaseConfig } from '../services/firebase';
 import { useAuth } from '../hooks/useAuth';
 import EntryListForAdmin from './EntryListForAdmin';
 import ChangePasswordForm from './ChangePasswordForm';
+import Mapping from './Mapping';
 
 const AdminDashboard = () => {
   const [activeTab, setActiveTab] = useState('entries');
@@ -600,12 +601,28 @@ const AdminDashboard = () => {
               </svg>
               Change Password
             </button>
+            <button
+            onClick={() => setActiveTab('trainerMapping')}
+            className={`py-2 px-4 sm:py-3 sm:px-6 rounded-lg font-medium text-sm flex items-center transition-all duration-200 
+              ${
+                activeTab === 'trainerMapping'
+                ? 'bg-blue-100 text-blue-700 shadow-inner'
+                : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              <svg className={`w-5 h-5 mr-2 ${activeTab === 'trainerMapping' ? 'text-blue-600' : 'text-gray-400'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+              </svg>
+              Trainer Mapping
+            </button>
           </nav>
         </div>
 
         {/* Tab Content */}
         <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6">
           {activeTab === 'entries' && <EntryListForAdmin />}
+
+          {activeTab === 'trainerMapping' && <Mapping/>}
           
           {activeTab === 'changePassword' && <ChangePasswordForm />}
           

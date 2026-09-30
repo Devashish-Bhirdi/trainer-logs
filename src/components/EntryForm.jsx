@@ -3,13 +3,27 @@ import { addDoc, collection, getDocs, query, where, doc, updateDoc } from 'fireb
 import { db } from '../services/firebase';
 import { useAuth } from '../hooks/useAuth';
 
+// Removes repeats (case-insensitive) but keeps the original order
+const dedupe = (list) => {
+  const seen = new Set();
+  return list.filter((item) => {
+    const key = item.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
 const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {} }) => {
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   const [project, setProject] = useState('');
   const [campus, setCampus] = useState('');
   const [batch, setBatch] = useState('');
   const [topic, setTopic] = useState('');
-  const [subtopic, setSubtopic] = useState('');
+  const [moduleName, setModuleName] = useState('');
+  const [selectedLessons, setSelectedLessons] = useState([]); // ticked from the curriculum list
+  const [extraLessons, setExtraLessons] = useState([]);       // typed under "Others", one chip each
+  const [extraInput, setExtraInput] = useState('');           // text currently in the "Others" box
   const [startTime, setStartTime] = useState('');
   const [endTime, setEndTime] = useState('');
   const [studentCount, setStudentCount] = useState('');
@@ -19,20 +33,38 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
   const [campuses, setCampuses] = useState([]);
   const [batches, setBatches] = useState([]);
   const [projectHasCampuses, setProjectHasCampuses] = useState(true);
-  
+  const [curriculumDocs, setCurriculumDocs] = useState([]);   // curriculum documents for the chosen batch
+  const [curriculumLoading, setCurriculumLoading] = useState(false);
+
   const { currentUser } = useAuth();
-  
-  const topics = ['Aptitude', 'SoftSkills', 'Technical', 'PowerBi', 'Excel'].sort((a,b) => a.toString().localeCompare(b.toString()));
+
+  // Everything below is derived from the fetched curriculum documents - no extra fetching per dropdown.
+  // Each document holds { topic: { module: [lessons] } }; merge all that apply to this batch into one map.
+  const curriculumMap = {};
+  curriculumDocs.forEach((d) => {
+    Object.entries(d.data || {}).forEach(([topicName, mods]) => {
+      if (!curriculumMap[topicName]) curriculumMap[topicName] = {};
+      Object.entries(mods || {}).forEach(([mod, lessons]) => {
+        curriculumMap[topicName][mod] = dedupe([...(curriculumMap[topicName][mod] || []), ...(lessons || [])]);
+      });
+    });
+  });
+  const topics = Object.keys(curriculumMap).sort((a, b) => a.localeCompare(b));
+  const modules = topic ? Object.keys(curriculumMap[topic] || {}) : [];
+  const lessonOptions = (topic && curriculumMap[topic] && curriculumMap[topic][moduleName]) || [];
 
   // if editing, populate fields
   useEffect(() => {
     if (initialEntry) {
+      const extras = initialEntry.extraLessons || [];
       setDate(new Date(initialEntry.date.seconds * 1000).toISOString().split('T')[0]);
       setProject(initialEntry.projectId || '');
       setCampus(initialEntry.campusId || '');
       setBatch(initialEntry.batchId || '');
       setTopic(initialEntry.topic || '');
-      setSubtopic(initialEntry.subtopic || '');
+      setModuleName(initialEntry.module || '');
+      setExtraLessons(extras);
+      setSelectedLessons((initialEntry.lessons || []).filter((l) => !extras.includes(l)));
       setStartTime(initialEntry.startTime || '');
       setEndTime(initialEntry.endTime || '');
       setStudentCount(initialEntry.studentCount || '');
@@ -61,6 +93,42 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
       fetchBatchesForCampus(campus);
     }
   }, [campus, projectHasCampuses]);
+
+  // Load the curriculum for the chosen batch (this is what feeds Topic -> Module -> Lessons).
+  // A curriculum document lists its batches in a `batch` map ({ batchId: batchName }), so fetch the
+  // project's documents and keep the ones that include this batch.
+  useEffect(() => {
+    if (!batch || !project) {
+      setCurriculumDocs([]);
+      setCurriculumLoading(false);
+      return;
+    }
+
+    let cancelled = false; // ignore the result if the batch changed while this was loading
+    const loadCurriculum = async () => {
+      setCurriculumLoading(true);
+      try {
+        const q = query(collection(db, 'curriculum'), where('projectId', '==', project));
+        const snapshot = await getDocs(q);
+        if (cancelled) return;
+        setCurriculumDocs(
+          snapshot.docs
+            .map((d) => ({ id: d.id, ...d.data() }))
+            .filter((d) => d.batch && d.batch[batch])
+        );
+      } catch (error) {
+        if (cancelled) return;
+        console.error('Error fetching curriculum:', error);
+        setCurriculumDocs([]);
+        setMessage('Error loading curriculum');
+      } finally {
+        if (!cancelled) setCurriculumLoading(false);
+      }
+    };
+    loadCurriculum();
+
+    return () => { cancelled = true; };
+  }, [batch, project]);
 
   const fetchProjects = async () => {
     try {
@@ -158,8 +226,60 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
     return 0;
   };
 
+  // ---------- Topic / module / lessons handlers ----------
+
+  // Called whenever project, campus or batch changes - the old choices no longer apply
+  const resetTopicSelection = () => {
+    setTopic('');
+    setModuleName('');
+    setSelectedLessons([]);
+  };
+
+  const handleTopicChange = (value) => {
+    setTopic(value);
+    setSelectedLessons([]);
+    // a topic with a single module (e.g. "General") doesn't need the extra click
+    const keys = Object.keys(curriculumMap[value] || {});
+    setModuleName(keys.length === 1 ? keys[0] : '');
+  };
+
+  const handleModuleChange = (value) => {
+    setModuleName(value);
+    setSelectedLessons([]);
+  };
+
+  const toggleLesson = (lesson) => {
+    setSelectedLessons((prev) =>
+      prev.includes(lesson) ? prev.filter((l) => l !== lesson) : [...prev, lesson]
+    );
+  };
+
+  // "Others": each Add (or Enter) turns the text box into one chip, so any number can be added
+  const addExtraLesson = () => {
+    const text = extraInput.trim();
+    if (!text) return;
+    setExtraLessons((prev) => dedupe([...prev, text]));
+    setExtraInput('');
+  };
+
+  const removeExtraLesson = (item) => {
+    setExtraLessons((prev) => prev.filter((l) => l !== item));
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
+
+    // Anything typed in the "Others" box but not yet added still counts
+    const pending = extraInput.trim();
+    const extras = dedupe(pending ? [...extraLessons, pending] : extraLessons);
+    const lessons = dedupe([...selectedLessons, ...extras]);
+
+    if (lessons.length === 0) {
+      setMessage('Error: select at least one lesson or add one under Others.');
+      setTimeout(() => setMessage(''), 3000);
+      return;
+    }
+
     setLoading(true);
     
     try {
@@ -176,7 +296,9 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
         batchId: batch,
         batchName: selectedBatchData?.name || '',
         topic,
-        subtopic,
+        module: moduleName,
+        lessons,            // curriculum lessons + "Others", combined
+        extraLessons: extras, // just the "Others" ones, so they can be told apart later
         startTime,
         endTime,
         hours,
@@ -200,7 +322,10 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
       setCampus('');
       setBatch('');
       setTopic('');
-      setSubtopic('');
+      setModuleName('');
+      setSelectedLessons([]);
+      setExtraLessons([]);
+      setExtraInput('');
       setStartTime('');
       setEndTime('');
       setStudentCount('');
@@ -248,6 +373,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
                 setProject(e.target.value);
                 setCampus('');
                 setBatch('');
+                resetTopicSelection();
               }}
               className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
               required
@@ -269,6 +395,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
                 onChange={(e) => {
                   setCampus(e.target.value);
                   setBatch('');
+                  resetTopicSelection();
                 }}
                 className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100"
                 required={projectHasCampuses}
@@ -285,7 +412,10 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
               <label className="block text-sm font-medium text-gray-700 mb-1">Batch</label>
               <select
                 value={batch}
-                onChange={(e) => setBatch(e.target.value)}
+                onChange={(e) => {
+                  setBatch(e.target.value);
+                  resetTopicSelection();
+                }}
                 className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100"
                 required
                 disabled={!campus}
@@ -305,7 +435,10 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
               <label className="block text-sm font-medium text-gray-700 mb-1">Batch</label>
               <select
                 value={batch}
-                onChange={(e) => setBatch(e.target.value)}
+                onChange={(e) => {
+                  setBatch(e.target.value);
+                  resetTopicSelection();
+                }}
                 className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100"
                 required
                 disabled={!project}
@@ -319,17 +452,24 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
             <div></div> {/* Empty div for layout consistency */}
           </div>
         )}
+
+        {batch && !curriculumLoading && curriculumDocs.length === 0 && (
+          <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-3">
+            No curriculum has been added for this batch yet. Add it from the Mapping page first.
+          </p>
+        )}
         
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Topic</label>
             <select
               value={topic}
-              onChange={(e) => setTopic(e.target.value)}
-              className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+              onChange={(e) => handleTopicChange(e.target.value)}
+              className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100"
               required
+              disabled={!batch || topics.length === 0}
             >
-              <option value="">Select Topic</option>
+              <option value="">{!batch ? 'Select Batch First' : 'Select Topic'}</option>
               {topics.map(t => (
                 <option key={t} value={t}>{t}</option>
               ))}
@@ -337,16 +477,99 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
           </div>
           
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Subtopic</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Module</label>
+            <select
+              value={moduleName}
+              onChange={(e) => handleModuleChange(e.target.value)}
+              className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100"
+              required
+              disabled={!topic}
+            >
+              <option value="">{!topic ? 'Select Topic First' : 'Select Module'}</option>
+              {modules.map(m => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {/* Lessons - multi-select, options come from the chosen module */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Lessons Covered
+            {selectedLessons.length > 0 && (
+              <span className="ml-2 font-normal text-gray-500">({selectedLessons.length} selected)</span>
+            )}
+          </label>
+
+          {!moduleName ? (
+            <p className="text-sm text-gray-500">Select a module to see its lessons.</p>
+          ) : (
+            <div className="max-h-56 overflow-y-auto border border-gray-300 rounded-md divide-y divide-gray-100">
+              {lessonOptions.map(lesson => (
+                <label
+                  key={lesson}
+                  className="flex items-start gap-2 px-3 py-2 text-sm text-gray-800 hover:bg-gray-50 cursor-pointer"
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedLessons.includes(lesson)}
+                    onChange={() => toggleLesson(lesson)}
+                    className="mt-0.5"
+                  />
+                  <span>{lesson}</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Others - anything taught that isn't in the list above */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Others</label>
+          <div className="flex gap-2">
             <input
               type="text"
-              value={subtopic}
-              onChange={(e) => setSubtopic(e.target.value)}
-              className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-              required
-              placeholder="Enter subtopic details"
+              value={extraInput}
+              onChange={(e) => setExtraInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault(); // Enter would otherwise submit the whole form
+                  addExtraLesson();
+                }
+              }}
+              className="flex-1 p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+              placeholder="Taught something not listed? Type it and press Enter"
             />
+            <button
+              type="button"
+              onClick={addExtraLesson}
+              className="px-4 py-2 bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300 text-sm"
+            >
+              Add
+            </button>
           </div>
+
+          {extraLessons.length > 0 && (
+            <div className="flex flex-wrap gap-2 mt-2">
+              {extraLessons.map(item => (
+                <span
+                  key={item}
+                  className="inline-flex items-center gap-1 rounded-full bg-blue-100 text-blue-800 text-sm px-3 py-1"
+                >
+                  {item}
+                  <button
+                    type="button"
+                    onClick={() => removeExtraLesson(item)}
+                    aria-label={`Remove ${item}`}
+                    className="text-blue-600 hover:text-blue-900 leading-none"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
         
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6">
