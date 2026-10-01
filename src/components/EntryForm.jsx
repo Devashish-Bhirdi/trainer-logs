@@ -24,6 +24,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
   const [selectedLessons, setSelectedLessons] = useState([]); // ticked from the curriculum list
   const [extraLessons, setExtraLessons] = useState([]);       // typed under "Others", one chip each
   const [extraInput, setExtraInput] = useState('');           // text currently in the "Others" box
+  const [description, setDescription] = useState('');         // free-text summary of the session
   const [startTime, setStartTime] = useState('');
   const [endTime, setEndTime] = useState('');
   const [studentCount, setStudentCount] = useState('');
@@ -65,6 +66,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
       setModuleName(initialEntry.module || '');
       setExtraLessons(extras);
       setSelectedLessons((initialEntry.lessons || []).filter((l) => !extras.includes(l)));
+      setDescription(initialEntry.description || ''); // older entries have none
       setStartTime(initialEntry.startTime || '');
       setEndTime(initialEntry.endTime || '');
       setStudentCount(initialEntry.studentCount || '');
@@ -137,9 +139,9 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
       querySnapshot.forEach((doc) => {
         projectsData.push({ id: doc.id, ...doc.data() });
       });
-  // sort projects alphabetically by name
-  projectsData.sort((a, b) => (a.name || '').toString().localeCompare((b.name || '').toString()));
-  setProjects(projectsData);
+      // sort projects alphabetically by name
+      projectsData.sort((a, b) => (a.name || '').toString().localeCompare((b.name || '').toString()));
+      setProjects(projectsData);
     } catch (error) {
       console.error('Error fetching projects:', error);
       setMessage('Error loading projects');
@@ -154,11 +156,11 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
       querySnapshot.forEach((doc) => {
         campusesData.push({ id: doc.id, ...doc.data() });
       });
-  // sort campuses alphabetically by name
-  campusesData.sort((a, b) => (a.name || '').toString().localeCompare((b.name || '').toString()));
-  setCampuses(campusesData);
+      // sort campuses alphabetically by name
+      campusesData.sort((a, b) => (a.name || '').toString().localeCompare((b.name || '').toString()));
+      setCampuses(campusesData);
       setProjectHasCampuses(campusesData.length > 0);
-      
+
       // Reset campus when campuses change
       setCampus('');
     } catch (error) {
@@ -184,7 +186,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
       } else {
         setBatches([]);
       }
-      
+
       // Reset batch when batches change
       setBatch('');
     } catch (error) {
@@ -202,10 +204,10 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
       querySnapshot.forEach((doc) => {
         batchesData.push({ id: doc.id, ...doc.data() });
       });
-  // sort batches alphabetically by name
-  batchesData.sort((a, b) => (a.name || '').toString().localeCompare((b.name || '').toString()));
-  setBatches(batchesData);
-      
+      // sort batches alphabetically by name
+      batchesData.sort((a, b) => (a.name || '').toString().localeCompare((b.name || '').toString()));
+      setBatches(batchesData);
+
       // Reset batch when batches change
       setBatch('');
     } catch (error) {
@@ -225,6 +227,28 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
     }
     return 0;
   };
+
+  // ---------- Validation: every field must be filled before the form can be submitted ----------
+
+  // "Others" is optional on its own, but the session needs at least one lesson from either list.
+  // Text typed in the Others box and not yet added still counts (handleSubmit adds it).
+  const hasLessons = selectedLessons.length > 0 || extraLessons.length > 0 || extraInput.trim() !== '';
+
+  const missingFields = [];
+  if (!date) missingFields.push('Date');
+  if (!project) missingFields.push('Project');
+  if (projectHasCampuses && !campus) missingFields.push('Campus');
+  if (!batch) missingFields.push('Batch');
+  if (!topic) missingFields.push('Topic');
+  if (!moduleName) missingFields.push('Module');
+  if (!hasLessons) missingFields.push('Lessons');
+  if (!description.trim()) missingFields.push('Description');
+  if (!startTime) missingFields.push('Start time');
+  if (!endTime) missingFields.push('End time');
+  if (startTime && endTime && Number(calculateHours()) <= 0) missingFields.push('End time after start time');
+  if (!(parseInt(studentCount, 10) >= 1)) missingFields.push('Student count');
+
+  const isFormComplete = missingFields.length === 0;
 
   // ---------- Topic / module / lessons handlers ----------
 
@@ -269,19 +293,20 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
   const handleSubmit = async (e) => {
     e.preventDefault();
 
+    // Safety net: the button is already disabled until everything is filled, but never trust the UI alone
+    if (!isFormComplete) {
+      setMessage(`Error: please complete ${missingFields.join(', ')}.`);
+      setTimeout(() => setMessage(''), 3000);
+      return;
+    }
+
     // Anything typed in the "Others" box but not yet added still counts
     const pending = extraInput.trim();
     const extras = dedupe(pending ? [...extraLessons, pending] : extraLessons);
     const lessons = dedupe([...selectedLessons, ...extras]);
 
-    if (lessons.length === 0) {
-      setMessage('Error: select at least one lesson or add one under Others.');
-      setTimeout(() => setMessage(''), 3000);
-      return;
-    }
-
     setLoading(true);
-    
+
     try {
       const hours = calculateHours();
       const selectedProjectData = projects.find(p => p.id === project);
@@ -299,10 +324,11 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
         module: moduleName,
         lessons,            // curriculum lessons + "Others", combined
         extraLessons: extras, // just the "Others" ones, so they can be told apart later
+        description: description.trim(), // the whole text as one string
         startTime,
         endTime,
         hours,
-        studentCount: parseInt(studentCount),
+        studentCount: parseInt(studentCount, 10),
         trainerId: currentUser.uid,
         trainerName: currentUser.displayName || currentUser.email,
       };
@@ -316,7 +342,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
         await addDoc(collection(db, 'entries'), { ...payload, createdAt: new Date() });
         setMessage('Entry submitted successfully!');
       }
-  // Reset form
+      // Reset form
       setDate(new Date().toISOString().split('T')[0]);
       setProject('');
       setCampus('');
@@ -326,14 +352,15 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
       setSelectedLessons([]);
       setExtraLessons([]);
       setExtraInput('');
+      setDescription('');
       setStartTime('');
       setEndTime('');
       setStudentCount('');
-  onSaved();
+      onSaved();
     } catch (error) {
       setMessage('Error submitting entry: ' + error.message);
     }
-    
+
     setLoading(false);
     setTimeout(() => setMessage(''), 3000);
   };
@@ -341,17 +368,17 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
   return (
     <div >
       <h2 className="text-xl font-semibold text-gray-800 mb-4 md:mb-6">Add Work Entry</h2>
-      
+
       {message && (
         <div className={`mb-4 p-3 rounded-md text-sm md:text-base ${
-          message.includes('Error') 
-            ? 'bg-red-100 text-red-700' 
+          message.includes('Error')
+            ? 'bg-red-100 text-red-700'
             : 'bg-green-100 text-green-700'
         }`}>
           {message}
         </div>
       )}
-      
+
       <form onSubmit={handleSubmit} className="space-y-4 md:space-y-6">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
           <div>
@@ -364,7 +391,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
               required
             />
           </div>
-          
+
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Project</label>
             <select
@@ -385,7 +412,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
             </select>
           </div>
         </div>
-        
+
         {projectHasCampuses && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
             <div>
@@ -407,7 +434,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
                 ))}
               </select>
             </div>
-            
+
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Batch</label>
               <select
@@ -428,7 +455,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
             </div>
           </div>
         )}
-        
+
         {!projectHasCampuses && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
             <div>
@@ -458,7 +485,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
             No curriculum has been added for this batch yet. Add it from the Mapping page first.
           </p>
         )}
-        
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Topic</label>
@@ -475,7 +502,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
               ))}
             </select>
           </div>
-          
+
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Module</label>
             <select
@@ -571,7 +598,20 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
             </div>
           )}
         </div>
-        
+
+        {/* Description - free text about the session, saved as one string */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+          <textarea
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            rows={3}
+            required
+            className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+            placeholder="Briefly describe what was covered in this session"
+          />
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Start Time</label>
@@ -583,7 +623,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
               required
             />
           </div>
-          
+
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">End Time</label>
             <input
@@ -594,7 +634,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
               required
             />
           </div>
-          
+
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Hours</label>
             <input
@@ -605,7 +645,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
             />
           </div>
         </div>
-        
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Student Count</label>
@@ -620,12 +660,19 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
             />
           </div>
         </div>
-        
+
+        {/* Tells the user why the button is disabled */}
+        {!isFormComplete && (
+          <p className="text-sm text-gray-500">
+            Still needed: {missingFields.join(', ')}
+          </p>
+        )}
+
         <div className="flex space-x-3">
           <button
             type="submit"
-            disabled={loading}
-            className="flex-1 px-4 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 transition-colors text-sm md:text-base"
+            disabled={loading || !isFormComplete}
+            className="flex-1 px-4 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm md:text-base"
           >
             {loading ? (initialEntry ? 'Saving...' : 'Submitting...') : (initialEntry ? 'Save Changes' : 'Submit Entry')}
           </button>

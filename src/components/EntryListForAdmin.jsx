@@ -11,8 +11,8 @@ const EntryListForAdmin = () => {
   const [trainers, setTrainers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState({
-    project: '',
-    campus: '',
+  project: '',
+  campus: '',
   batch: '',
   trainer: '',
   startDate: '',
@@ -384,8 +384,8 @@ const EntryListForAdmin = () => {
                   <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">{getTrainerDisplay(entry.trainerId, entry)}</td>
                   <td className="px-4 py-4 text-sm text-gray-900">
                     <div className="font-medium">{entry.topic}</div>
-                    {entry.subtopic && (
-                      <div className="text-gray-500 text-xs">{entry.subtopic}</div>
+                    {(entry.subtopic || entry.description) && (
+                      <div className="text-gray-500 text-xs">{entry.subtopic || entry.description}</div>
                     )}
                   </td>
                   <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
