@@ -1,6 +1,5 @@
-import { useState, useEffect, useCallback, useRef, Fragment } from 'react';
-import { collection, getDocs, query, where, doc as firestoreDoc, writeBatch } from 'firebase/firestore';
-import * as XLSX from 'xlsx';
+import { useState, useEffect, useCallback, Fragment } from 'react';
+import { collection, getDocs, query, where } from 'firebase/firestore';
 import { db } from '../services/firebase'; // adjust this path if needed
 import { exportMappingToExcel } from '../services/mappingExportService';
 
@@ -189,22 +188,6 @@ const summarize = (rows) => {
   return { total, covered, pending: total - covered };
 };
 
-// counts for the upload dialog: { topics, modules, lessons }
-const sheetStats = (data) => {
-  let modules = 0;
-  let lessons = 0;
-  const topics = Object.keys(data);
-  topics.forEach((t) => {
-    Object.values(data[t]).forEach((list) => {
-      modules += 1;
-      lessons += list.length;
-    });
-  });
-  return { topics: topics.length, modules, lessons };
-};
-
-const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
-
 // Arrow + label (+ short summary while collapsed) for a campus / batch header
 const GroupToggle = ({ open, label, summary }) => (
   <span className="flex items-center gap-2">
@@ -240,17 +223,8 @@ const Mapping = () => {
   const [isExporting, setIsExporting] = useState(false); // loading state during async export
   const [exportError, setExportError] = useState(null);  // surface errors to the user
 
-  // ---- Curriculum upload state ----
-  const fileInputRef = useRef(null);
-  const [addingCurriculum, setAddingCurriculum] = useState(false);
-  const [curriculumMessage, setCurriculumMessage] = useState(null); // { type: 'success' | 'error', text }
-  const [parsedSheets, setParsedSheets] = useState([]);             // [{ sheetName, data }] read from the workbook
-  const [sheetBatches, setSheetBatches] = useState({});             // { sheetName: [batchId, ...] } chosen in the dialog
-  const [showCurriculumModal, setShowCurriculumModal] = useState(false);
-
   // ---- Mapping data ----
   const [curriculum, setCurriculum] = useState([]);                // curriculum documents for the current filters
-  const [curriculumRefresh, setCurriculumRefresh] = useState(0);   // bumped after an upload so the mapping reloads
   const [entriesLoading, setEntriesLoading] = useState(false);
   const [curriculumLoading, setCurriculumLoading] = useState(false);
 
@@ -270,13 +244,6 @@ const Mapping = () => {
 
   // Data loads as soon as a project is chosen; campus / batch / trainer / dates just narrow it down
   const filtersReady = !!filters.project;
-
-  // The dialog needs a project (and a campus, if the project has campuses) before batches can be chosen
-  const destinationReady = !!filters.project && (!projectHasCampuses || !!filters.campus);
-
-  // Saving needs a destination plus at least one sheet linked to at least one batch
-  const canSaveCurriculum =
-    destinationReady && parsedSheets.some((s) => (sheetBatches[s.sheetName] || []).length > 0);
 
   // Fetch projects and trainers when component loads
   useEffect(() => {
@@ -308,12 +275,6 @@ const Mapping = () => {
     if (filters.campus) fetchBatchesForCampus(filters.campus);
     else fetchBatchesForProject(filters.project);
   }, [filters.campus]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // The batch list changes with the project / campus, so any sheet -> batch links made in the
-  // dialog would point at the wrong batches. Clear them.
-  useEffect(() => {
-    setSheetBatches({});
-  }, [filters.project, filters.campus]);
 
   // Dates are NOT part of the query (that would need a composite index);
   // they are applied in memory further down, so changing a date never refetches.
@@ -387,7 +348,7 @@ const Mapping = () => {
     loadCurriculum();
 
     return () => { cancelled = true; };
-  }, [filtersReady, filters.project, filters.campus, curriculumRefresh]);
+  }, [filtersReady, filters.project, filters.campus]);
 
   // Fetch all projects
   const fetchProjects = async () => {
@@ -596,144 +557,6 @@ const Mapping = () => {
     }
   };
 
-  // ---------- Curriculum upload ----------
-
-  // Reads one worksheet -> { sheetName, data: { topic: { module: [lessons] } } }, or null if it has no lessons.
-  // Columns are read by position (A = topic, B = module, C = lesson), so the header text doesn't matter.
-  // A blank topic or module cell inherits the one above it (merged-cell style layouts).
-  const parseBatchSheet = (ws, sheetName) => {
-    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
-    const data = {};
-    let currentTopic = 'General';           // used until a topic name shows up
-    let currentModule = 'General';          // used until a module name shows up
-
-    rows.slice(1).forEach((row) => {        // row 0 is the header row
-      const topicCell = String(row[0] ?? '').trim();
-      const moduleCell = String(row[1] ?? '').trim();
-      const lessonCell = String(row[2] ?? '').trim();
-
-      if (topicCell) {
-        currentTopic = topicCell;
-        // a new topic with no module written must not inherit the previous topic's module
-        if (!moduleCell) currentModule = 'General';
-      }
-      if (moduleCell) currentModule = moduleCell;
-      if (!lessonCell) return;                     // spacer rows carry no lesson
-
-      if (!data[currentTopic]) data[currentTopic] = {};
-      if (!data[currentTopic][currentModule]) data[currentTopic][currentModule] = [];
-      data[currentTopic][currentModule].push(lessonCell);
-    });
-
-    return Object.keys(data).length ? { sheetName, data } : null;
-  };
-
-  // Fired when the user picks a file. Parses every sheet, then opens the floating dialog.
-  const handleCurriculum = async (e) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';                    // lets the same file be chosen again later
-    if (!file) return;
-
-    setCurriculumMessage(null);
-    try {
-      const buffer = await file.arrayBuffer();
-      const workbook = XLSX.read(buffer, { type: 'array' });
-
-      const sheets = workbook.SheetNames
-        .map((name) => parseBatchSheet(workbook.Sheets[name], name.trim()))
-        .filter(Boolean);
-
-      if (sheets.length === 0) {
-        setCurriculumMessage({
-          type: 'error',
-          text: 'No lessons found. Each sheet needs the columns Topic, Module and Lesson.',
-        });
-        return;
-      }
-
-      setParsedSheets(sheets);
-      setSheetBatches({});
-      setShowCurriculumModal(true);
-    } catch (error) {
-      console.error('Error reading curriculum file:', error);
-      setCurriculumMessage({ type: 'error', text: 'Could not read that file. Please choose a valid Excel workbook.' });
-    }
-  };
-
-  const closeCurriculumModal = () => {
-    setShowCurriculumModal(false);
-    setParsedSheets([]);
-    setSheetBatches({});
-  };
-
-  // Tick / untick a batch under one sheet
-  const toggleSheetBatch = (sheetName, batchId) =>
-    setSheetBatches((prev) => {
-      const current = prev[sheetName] || [];
-      const next = current.includes(batchId)
-        ? current.filter((id) => id !== batchId)
-        : [...current, batchId];
-      return { ...prev, [sheetName]: next };
-    });
-
-  // The dialog reuses the page's own project / campus filters and the batch list already
-  // fetched for them, so nothing extra is loaded.
-
-  // Writes one document per sheet to the "curriculum" collection, all-or-nothing.
-  // Sheets with no batch chosen are skipped.
-  const handleSaveCurriculum = async () => {
-    const project = projects.find((p) => p.id === filters.project);
-    const campus = campuses.find((c) => c.id === filters.campus);
-    if (!project || (projectHasCampuses && !campus)) return;
-
-    const docs = parsedSheets
-      .map((sheet) => {
-        const batch = {};
-        (sheetBatches[sheet.sheetName] || []).forEach((id) => {
-          const b = batches.find((x) => x.id === id);
-          if (b) batch[b.id] = b.name;
-        });
-        return { sheet, batch };
-      })
-      .filter(({ batch }) => Object.keys(batch).length > 0);
-
-    if (docs.length === 0) return;
-
-    setAddingCurriculum(true);
-    try {
-      const wb = writeBatch(db);
-      docs.forEach(({ sheet, batch }) => {
-        wb.set(firestoreDoc(collection(db, 'curriculum')), {
-          name: sheet.sheetName,
-          data: sheet.data,               // { topic: { module: [lessons] } }
-          batch,                          // { batchId: batchName }
-          projectId: project.id,
-          projectName: project.name,
-          campusId: campus ? campus.id : null,
-          campusName: campus ? campus.name : null,
-        });
-      });
-      await wb.commit();
-      setCurriculumRefresh((n) => n + 1);
-
-      const batchCount = docs.reduce((n, { batch }) => n + Object.keys(batch).length, 0);
-      const skipped = parsedSheets.length - docs.length;
-      setCurriculumMessage({
-        type: 'success',
-        text:
-          `Added ${plural(docs.length, 'curriculum')} for ${plural(batchCount, 'batch')}.` +
-          (skipped ? ` ${plural(skipped, 'sheet')} skipped (no batch chosen).` : ''),
-      });
-      closeCurriculumModal();
-    } catch (error) {
-      console.error('Error saving curriculum:', error);
-      setCurriculumMessage({ type: 'error', text: 'Could not save the curriculum. Please try again.' });
-      closeCurriculumModal();
-    } finally {
-      setAddingCurriculum(false);
-    }
-  };
-
   // Apply the date range in memory ('YYYY-MM-DD' strings compare correctly as plain text)
   const visibleEntries = entries.filter((e) => {
     const key = toDateKey(e.date);
@@ -751,9 +574,6 @@ const Mapping = () => {
       )
     : { dailyRows: [], pendingRows: [] };
   const mappingLoading = entriesLoading || curriculumLoading;
-
-  // Batches that already have a curriculum, so the dialog can flag them
-  const batchIdsWithCurriculum = new Set(curriculum.flatMap((c) => Object.keys(c.batch || {})));
 
   // With no batch picked, the pending table is grouped by campus and then batch
   const showGroups = !filters.batch;
@@ -935,29 +755,6 @@ const Mapping = () => {
           />
         </div>
 
-        {/* Add Curriculum */}
-        <div className="flex flex-col justify-end">
-          <label className="block text-sm font-medium text-gray-700 mb-1 invisible">
-            Add Curriculum
-          </label>
-
-          <input
-            type="file"
-            accept=".xlsx,.xls"
-            ref={fileInputRef}
-            onChange={handleCurriculum}
-            className="hidden"
-          />
-
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={addingCurriculum}
-            className="px-3 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm font-medium transition-colors disabled:opacity-60"
-          >
-            {addingCurriculum ? 'Adding...' : 'Add Curriculum'}
-          </button>
-        </div>
-
         {/* Excel */}
         <div className="flex flex-col justify-end">
           <label className="block text-sm font-medium text-gray-700 mb-1 invisible">
@@ -976,12 +773,6 @@ const Mapping = () => {
 
       {exportError && (
         <p className="mb-4 text-sm text-red-600">{exportError}</p>
-      )}
-
-      {curriculumMessage && (
-        <p className={`mb-4 text-sm ${curriculumMessage.type === 'error' ? 'text-red-600' : 'text-green-700'}`}>
-          {curriculumMessage.text}
-        </p>
       )}
 
       {!filtersReady ? (
@@ -1201,137 +992,6 @@ const Mapping = () => {
         </div>
       )}
 
-      {/* Floating dialog: link each sheet in the workbook to the batches it applies to */}
-      {showCurriculumModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-lg bg-white p-6 shadow-xl">
-            <h3 className="text-lg font-semibold text-gray-800 mb-1">Add Curriculum</h3>
-            <p className="text-sm text-gray-500 mb-4">
-              Choose the project and campus, then pick the batches that follow each sheet's curriculum.
-            </p>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-              {/* Project */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Project</label>
-                <select
-                  value={filters.project}
-                  onChange={(e) => handleFilterChange('project', e.target.value)}
-                  className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-                >
-                  <option value="">Select Project</option>
-                  {projects.map((project) => (
-                    <option key={project.id} value={project.id}>{project.name}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Campus */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Campus</label>
-                <select
-                  value={filters.campus}
-                  onChange={(e) => handleFilterChange('campus', e.target.value)}
-                  disabled={!filters.project || !projectHasCampuses}
-                  className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100 disabled:text-gray-400"
-                >
-                  <option value="">
-                    {!filters.project
-                      ? 'Select Project First'
-                      : !projectHasCampuses
-                        ? 'No Campuses'
-                        : 'Select Campus'}
-                  </option>
-                  {campuses.map((campus) => (
-                    <option key={campus.id} value={campus.id}>{campus.name}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            {/* One block per sheet: what was read, and which batches it applies to */}
-            <div className="space-y-3">
-              {parsedSheets.map((sheet) => {
-                const stats = sheetStats(sheet.data);
-                const selectedIds = sheetBatches[sheet.sheetName] || [];
-                const takenElsewhere = new Set(
-                  Object.entries(sheetBatches)
-                    .filter(([name]) => name !== sheet.sheetName)
-                    .flatMap(([, ids]) => ids)
-                );
-
-                return (
-                  <div key={sheet.sheetName} className="rounded-md border border-gray-200 p-3">
-                    <div className="flex flex-wrap items-baseline justify-between gap-2">
-                      <span className="font-medium text-gray-900">{sheet.sheetName}</span>
-                      <span className="text-xs text-gray-500">
-                        {plural(stats.topics, 'topic')}, {plural(stats.modules, 'module')}, {plural(stats.lessons, 'lesson')}
-                      </span>
-                    </div>
-
-                    {!destinationReady ? (
-                      <p className="mt-2 text-sm text-gray-500">
-                        {!filters.project ? 'Select a project first.' : 'Select a campus first.'}
-                      </p>
-                    ) : batches.length === 0 ? (
-                      <p className="mt-2 text-sm text-gray-500">No batches found here.</p>
-                    ) : (
-                      <>
-                        <div className="mt-2 grid max-h-36 grid-cols-1 gap-1 overflow-y-auto sm:grid-cols-2">
-                          {batches.map((b) => {
-                            const disabled = takenElsewhere.has(b.id);
-                            return (
-                              <label
-                                key={b.id}
-                                className={`flex items-center gap-2 rounded px-2 py-1 text-sm ${
-                                  disabled ? 'text-gray-400' : 'text-gray-800 hover:bg-gray-50'
-                                }`}
-                              >
-                                <input
-                                  type="checkbox"
-                                  checked={selectedIds.includes(b.id)}
-                                  disabled={disabled}
-                                  onChange={() => toggleSheetBatch(sheet.sheetName, b.id)}
-                                />
-                                <span>{b.name}</span>
-                                {batchIdsWithCurriculum.has(b.id) && (
-                                  <span className="text-xs text-amber-700">has curriculum</span>
-                                )}
-                              </label>
-                            );
-                          })}
-                        </div>
-                        <p className="mt-1 text-xs text-gray-500">
-                          {selectedIds.length
-                            ? `${plural(selectedIds.length, 'batch')} selected`
-                            : 'No batch selected. This sheet will be skipped.'}
-                        </p>
-                      </>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="mt-6 flex justify-end gap-2">
-              <button
-                onClick={closeCurriculumModal}
-                disabled={addingCurriculum}
-                className="px-3 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSaveCurriculum}
-                disabled={!canSaveCurriculum || addingCurriculum}
-                className="px-3 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm font-medium transition-colors disabled:opacity-60"
-              >
-                {addingCurriculum ? 'Adding...' : 'Add'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
