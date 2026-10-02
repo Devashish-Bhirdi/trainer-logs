@@ -680,16 +680,15 @@ const Mapping = () => {
     setIsExporting(true);
     setExportError(null);
     try {
-      const trainer = trainers.find((t) => t.id === filters.trainer || t.uid === filters.trainer);
-
-      exportMappingToExcel(dailyRows, {
-        project: projects.find((p) => p.id === filters.project)?.name,
-        campus: campuses.find((c) => c.id === filters.campus)?.name,
-        batch: batches.find((b) => b.id === filters.batch)?.name,
-        trainer: trainer ? (trainer.name || trainer.email) : '',
-        startDate: filters.startDate,
-        endDate: filters.endDate,
-      });
+      exportMappingToExcel(
+        dailyRows,
+        {
+          project: projects.find((p) => p.id === filters.project)?.name,
+          campus: campuses.find((c) => c.id === filters.campus)?.name,
+          batch: batches.find((b) => b.id === filters.batch)?.name,
+        },
+        pendingRows
+      );
     } catch (error) {
       console.error('Error exporting to Excel:', error);
       setExportError(error.message || 'Export failed. Please try again.');
