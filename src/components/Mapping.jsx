@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, Fragment } from 'react';
-import { collection, getDocs, query, where } from 'firebase/firestore';
+import { collection, getDocs, query, where, doc, updateDoc } from 'firebase/firestore';
 import { db } from '../services/firebase'; // adjust this path if needed
 import { exportMappingToExcel } from '../services/mappingExportService';
+import ManageExtraModal from '../components/ManageExtraModal'; // adjust this path if needed
 
 // ---------- Mapping helpers (pure functions, no Firebase) ----------
 
@@ -38,15 +39,39 @@ const formatDateKey = (key) => {
   return `${Number(d)} ${MONTHS[Number(m) - 1]} ${y}`;
 };
 
+// Older saves held ONE lesson per extra ({ extra, topic, module, lesson }).
+// An extra can now map to several lessons: { extra, targets: [{ topic, module, lesson }] }.
+const normalizeMappings = (list) =>
+  (Array.isArray(list) ? list : []).map((m) => ({
+    extra: m.extra,
+    targets: Array.isArray(m.targets)
+      ? m.targets
+      : m.lesson ? [{ topic: m.topic, module: m.module, lesson: m.lesson }] : [],
+  }));
+
+// Admin cuts of a long extra text: [{ source: 'original text', parts: ['piece 1', 'piece 2', ...] }]
+const normalizeSplits = (list) =>
+  (Array.isArray(list) ? list : []).filter(
+    (s) => s && s.source && Array.isArray(s.parts) && s.parts.length
+  );
+
+// Pieces the admin discarded (leftovers like "1." or stray words): ['text', ...]
+const normalizeIgnored = (list) =>
+  (Array.isArray(list) ? list : []).filter((x) => typeof x === 'string' && x.trim());
+
 // Compares the curriculum with the trainers' entries.
 //   - a lesson in an entry counts as covered when (batch, topic, module, lesson) exists in the curriculum
-//   - any lesson that is NOT in the curriculum is an extra
+//   - an extra text may be split by the admin (entry.extraSplits) into smaller pieces,
+//     and every piece is judged on its own
+//   - a piece the admin has moved (entry.extraMappings) counts as covered for the lessons it was moved to
+//   - any other piece that is NOT in the curriculum is an extra
 //
 // Each curriculum document looks like:
 //   { name, data: { topic: { module: [lessons] } }, batch: { batchId: batchName }, campusName, ... }
 // and applies to EVERY batch in its `batch` map. `batchFilter` (optional) limits the result to one batch.
 //
 // Returns { dailyRows, pendingRows } for the two tables.
+// dailyRows has ONE row per entry, so trainer / topic / module / hours always belong together.
 const buildMapping = (entries, curriculumDocs, getTrainerName, batchFilter = '') => {
   // 1. flatten the curriculum into unique (batch, topic, module, lesson) rows
   //    (if two documents cover the same batch, a repeated lesson is only counted once)
@@ -75,11 +100,11 @@ const buildMapping = (entries, curriculumDocs, getTrainerName, batchFilter = '')
     });
   });
 
-  // 2. walk the entries: build the daily rows, note which curriculum lessons were covered,
+  // 2. walk the entries: build one daily row per entry, note which curriculum lessons were covered,
   //    and share each session's hours across the lessons it touched
   const coveredKeys = new Set();
   const hoursByGroup = {};   // "batch||topic||module" -> estimated hours
-  const daily = {};          // "date||batch"          -> row
+  const dailyRows = [];
 
   entries.forEach((entry) => {
     // older entries saved a single "subtopic" text instead of a lessons list
@@ -87,52 +112,95 @@ const buildMapping = (entries, curriculumDocs, getTrainerName, batchFilter = '')
     const hours = Number(entry.hours) || 0;
     const perLesson = lessons.length ? hours / lessons.length : 0;
 
-    const dateKey = toDateKey(entry.date);
-    const rowKey = `${dateKey}||${entry.batchId}`;
-    if (!daily[rowKey]) {
-      daily[rowKey] = {
-        dateKey,
-        batchId: entry.batchId,
-        batchName: entry.batchName || '',
-        trainers: new Set(),
-        topics: new Set(),
-        covered: [],
-        extra: [],
-        hours: 0,
-        studentCounts: [],
-      };
-    }
-    const row = daily[rowKey];
-    row.trainers.add(getTrainerName(entry));
-    if (entry.topic) row.topics.add(entry.topic);
-    row.hours += hours;
-    if (entry.studentCount != null) row.studentCounts.push(Number(entry.studentCount) || 0);
+    // admin decisions: "extra text" -> one or more real curriculum lessons
+    const mappings = normalizeMappings(entry.extraMappings);
+    const mappingByExtra = new Map(mappings.map((m) => [norm(m.extra), m]));
+
+    // admin decisions: a long extra text cut into smaller pieces
+    const splits = normalizeSplits(entry.extraSplits);
+    const partsBySource = new Map(splits.map((s) => [norm(s.source), s.parts]));
+
+    // admin decisions: pieces to throw away (neither extra nor a lesson)
+    const ignored = normalizeIgnored(entry.extraIgnored);
+    const ignoredSet = new Set(ignored.map(norm));
+
+    const covered = [];
+    const extra = [];
+    const mappedTo = [];
+    const rawExtras = [];   // original texts that still need the admin's attention (or were handled by them)
 
     lessons.forEach((lesson) => {
-      const key = lessonKey(entry.batchId, entry.topic, entry.module, lesson);
-      const match = curriculumLessons.get(key);
-      if (match) {
-        coveredKeys.add(key);
-        const groupKey = `${match.batchId}||${norm(match.topic)}||${norm(match.module)}`;
-        hoursByGroup[groupKey] = (hoursByGroup[groupKey] || 0) + perLesson;
-        row.covered.push(match.lesson);   // use the curriculum's own spelling
-      } else {
-        row.extra.push(lesson);           // not in the curriculum -> extra
-      }
+      // everything a piece of text counts as: itself, or the lessons the admin mapped it to
+      const resolve = (text) => {
+        const hits = [];
+        const ownKey = lessonKey(entry.batchId, entry.topic, entry.module, text);
+        const own = curriculumLessons.get(ownKey);
+        if (own) {
+          hits.push({ key: ownKey, match: own, viaMapping: false });
+        } else {
+          const m = mappingByExtra.get(norm(text));
+          (m ? m.targets : []).forEach((t) => {
+            const key = lessonKey(entry.batchId, t.topic, t.module, t.lesson);
+            const match = curriculumLessons.get(key); // deleted since? it is simply skipped
+            if (match) hits.push({ key, match, viaMapping: true });
+          });
+        }
+        return hits;
+      };
+
+      // the admin may have split this text into parts; otherwise it is one unit
+      const parts = partsBySource.get(norm(lesson)) || [lesson];
+      const units = parts.map((text) => ({ text, hits: resolve(text) }));
+
+      // anything that is not a plain curriculum lesson can be managed in the window
+      if (units.some((u) => !u.hits.some((h) => !h.viaMapping))) rawExtras.push(lesson);
+
+      // ignored pieces take no share of the hours
+      const counted =
+        units.filter((u) => u.hits.length > 0 || !ignoredSet.has(norm(u.text))).length || 1;
+
+      units.forEach(({ text, hits }) => {
+        if (hits.length === 0) {
+          if (!ignoredSet.has(norm(text))) extra.push(text);   // a real extra (unless discarded)
+          return;
+        }
+        hits.forEach(({ key, match, viaMapping }) => {
+          coveredKeys.add(key);
+          const groupKey = `${match.batchId}||${norm(match.topic)}||${norm(match.module)}`;
+          hoursByGroup[groupKey] =
+            (hoursByGroup[groupKey] || 0) + perLesson / counted / hits.length;
+          covered.push(match.lesson);       // use the curriculum's own spelling
+          if (viaMapping) mappedTo.push(match.lesson);
+        });
+      });
+    });
+
+    dailyRows.push({
+      entryId: entry.id,
+      dateKey: toDateKey(entry.date),
+      batchId: entry.batchId,
+      batchName: entry.batchName || '',
+      trainers: [getTrainerName(entry)],   // kept as arrays so the Excel export keeps working
+      topics: entry.topic ? [entry.topic] : [],
+      module: entry.module || '',
+      covered: unique(covered),
+      mappedTo: unique(mappedTo),
+      extra: unique(extra),
+      rawExtras: unique(rawExtras),
+      mappings,
+      splits,
+      ignored,
+      hours,
+      students: entry.studentCount != null ? Number(entry.studentCount) || 0 : null,
     });
   });
 
-  const dailyRows = Object.values(daily)
-    .map((r) => ({
-      ...r,
-      trainers: [...r.trainers],
-      topics: [...r.topics],
-      covered: unique(r.covered),
-      extra: unique(r.extra),
-      // highest single-session count for that batch/day (not summed)
-      students: r.studentCounts.length ? Math.max(...r.studentCounts) : null,
-    }))
-    .sort((a, b) => a.dateKey.localeCompare(b.dateKey) || a.batchName.localeCompare(b.batchName));
+  dailyRows.sort(
+    (a, b) =>
+      a.dateKey.localeCompare(b.dateKey) ||
+      a.batchName.localeCompare(b.batchName) ||
+      a.trainers[0].localeCompare(b.trainers[0])
+  );
 
   // 3. pending lessons, grouped by batch -> topic -> module
   const groups = {};
@@ -167,6 +235,25 @@ const buildMapping = (entries, curriculumDocs, getTrainerName, batchFilter = '')
   );
 
   return { dailyRows, pendingRows };
+};
+
+// topic -> module -> lessons for ONE batch, used by the "Manage extra" window
+const curriculumTreeForBatch = (docs, batchId) => {
+  const tree = new Map();
+  docs.forEach(({ data, batch }) => {
+    if (!batch || !(batchId in batch)) return;
+    Object.entries(data || {}).forEach(([topic, modules]) => {
+      if (!tree.has(topic)) tree.set(topic, new Map());
+      Object.entries(modules || {}).forEach(([module, lessons]) => {
+        const m = tree.get(topic);
+        m.set(module, unique([...(m.get(module) || []), ...(lessons || [])]));
+      });
+    });
+  });
+  return [...tree].map(([topic, mods]) => ({
+    topic,
+    modules: [...mods].map(([module, lessons]) => ({ module, lessons })),
+  }));
 };
 
 // campus -> batch -> rows (campusName is '' for projects without campuses)
@@ -230,6 +317,11 @@ const Mapping = () => {
 
   // keys of collapsed groups in the pending table: `c:<campusName>` and `b:<batchId>`
   const [collapsed, setCollapsed] = useState(() => new Set());
+
+  // ---- Manage extra window ----
+  const [manageEntryId, setManageEntryId] = useState(null); // entry whose extras are being managed
+  const [savingExtra, setSavingExtra] = useState(false);
+  const [extraError, setExtraError] = useState(null);
 
   const [filters, setFilters] = useState({
     project: '',
@@ -300,8 +392,8 @@ const Mapping = () => {
 
       const querySnapshot = await getDocs(query(collection(db, 'entries'), ...constraints));
       const entriesData = [];
-      querySnapshot.forEach((doc) => {
-        entriesData.push({ id: doc.id, ...doc.data() });
+      querySnapshot.forEach((d) => {
+        entriesData.push({ id: d.id, ...d.data() });
       });
 
       setEntries(entriesData);
@@ -357,10 +449,10 @@ const Mapping = () => {
 
       const projectsData = [];
 
-      querySnapshot.forEach((doc) => {
+      querySnapshot.forEach((d) => {
         projectsData.push({
-          id: doc.id,
-          ...doc.data()
+          id: d.id,
+          ...d.data()
         });
       });
 
@@ -389,10 +481,10 @@ const Mapping = () => {
 
       const campusesData = [];
 
-      querySnapshot.forEach((doc) => {
+      querySnapshot.forEach((d) => {
         campusesData.push({
-          id: doc.id,
-          ...doc.data()
+          id: d.id,
+          ...d.data()
         });
       });
 
@@ -426,10 +518,10 @@ const Mapping = () => {
 
       const batchesData = [];
 
-      querySnapshot.forEach((doc) => {
+      querySnapshot.forEach((d) => {
         batchesData.push({
-          id: doc.id,
-          ...doc.data()
+          id: d.id,
+          ...d.data()
         });
       });
 
@@ -460,10 +552,10 @@ const Mapping = () => {
 
       const batchesData = [];
 
-      querySnapshot.forEach((doc) => {
+      querySnapshot.forEach((d) => {
         batchesData.push({
-          id: doc.id,
-          ...doc.data()
+          id: d.id,
+          ...d.data()
         });
       });
 
@@ -486,8 +578,8 @@ const Mapping = () => {
       const q = query(collection(db, 'users'), where('role', '==', 'trainer'));
       const querySnapshot = await getDocs(q);
       const trainerData = [];
-      querySnapshot.forEach((doc) => {
-        trainerData.push({ id: doc.id, ...doc.data() });
+      querySnapshot.forEach((d) => {
+        trainerData.push({ id: d.id, ...d.data() });
       });
       trainerData.sort((a, b) => ((a.name || a.email) || '').toString().localeCompare(((b.name || b.email) || '').toString()));
       setTrainers(trainerData);
@@ -533,6 +625,55 @@ const Mapping = () => {
     }
   };
 
+  // Save the admin's decisions on the entry itself:
+  //   mappings = "this piece of extra is really that curriculum lesson(s)"
+  //   splits   = "this long extra text is really these separate pieces"
+  const saveExtraMappings = async (entryId, mappings, splits, ignored) => {
+    setSavingExtra(true);
+    setExtraError(null);
+    try {
+      await updateDoc(doc(db, 'entries', entryId), {
+        extraMappings: mappings,
+        extraSplits: splits,
+        extraIgnored: ignored,
+      });
+      // update locally so the tables refresh without a refetch
+      setEntries((prev) =>
+        prev.map((e) =>
+          e.id === entryId
+            ? { ...e, extraMappings: mappings, extraSplits: splits, extraIgnored: ignored }
+            : e
+        )
+      );
+      setManageEntryId(null);
+    } catch (error) {
+      console.error('Error saving extra mappings:', error);
+      setExtraError(error.message || 'Could not save. Please try again.');
+    } finally {
+      setSavingExtra(false);
+    }
+  };
+
+  // Apply the date range in memory ('YYYY-MM-DD' strings compare correctly as plain text)
+  const visibleEntries = entries.filter((e) => {
+    const key = toDateKey(e.date);
+    if (filters.startDate && key < filters.startDate) return false;
+    if (filters.endDate && key > filters.endDate) return false;
+    return true;
+  });
+
+  const { dailyRows, pendingRows } = filtersReady
+    ? buildMapping(
+        visibleEntries,
+        curriculum,
+        (entry) => getTrainerDisplay(entry.trainerId, entry),
+        filters.batch
+      )
+    : { dailyRows: [], pendingRows: [] };
+  const mappingLoading = entriesLoading || curriculumLoading;
+
+  const manageRow = manageEntryId ? dailyRows.find((r) => r.entryId === manageEntryId) : null;
+
   const handleExport = async (format) => {
     if (format !== 'excel') return;
 
@@ -556,24 +697,6 @@ const Mapping = () => {
       setIsExporting(false);
     }
   };
-
-  // Apply the date range in memory ('YYYY-MM-DD' strings compare correctly as plain text)
-  const visibleEntries = entries.filter((e) => {
-    const key = toDateKey(e.date);
-    if (filters.startDate && key < filters.startDate) return false;
-    if (filters.endDate && key > filters.endDate) return false;
-    return true;
-  });
-
-  const { dailyRows, pendingRows } = filtersReady
-    ? buildMapping(
-        visibleEntries,
-        curriculum,
-        (entry) => getTrainerDisplay(entry.trainerId, entry),
-        filters.batch
-      )
-    : { dailyRows: [], pendingRows: [] };
-  const mappingLoading = entriesLoading || curriculumLoading;
 
   // With no batch picked, the pending table is grouped by campus and then batch
   const showGroups = !filters.batch;
@@ -789,7 +912,7 @@ const Mapping = () => {
           {/* Daily coverage */}
           <section className="rounded-lg border border-gray-200 bg-white p-4 md:p-6">
             <h3 className="text-lg font-semibold text-gray-900">Daily coverage</h3>
-            <p className="text-sm text-gray-500 mb-4">One row per batch, per day.</p>
+            <p className="text-sm text-gray-500 mb-4">One row per entry (batch, day, trainer and topic).</p>
 
             <div className="overflow-x-auto rounded-md border border-gray-200">
               <table className="min-w-full divide-y divide-gray-200">
@@ -797,41 +920,50 @@ const Mapping = () => {
                   <tr>
                     <th className={TH}>Date</th>
                     <th className={TH}>Batch</th>
-                    <th className={TH}>Trainer(s)</th>
-                    <th className={TH}>Topic(s)</th>
+                    <th className={TH}>Trainer</th>
+                    <th className={TH}>Topic</th>
+                    <th className={TH}>Module</th>
                     <th className={TH}>Lessons covered</th>
                     <th className={TH}>Extra topics</th>
                     <th className={THC}>Hours</th>
                     <th className={THC}>Students</th>
+                    <th className={THC}></th>
                   </tr>
                 </thead>
 
                 <tbody className="bg-white divide-y divide-gray-200">
                   {dailyRows.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="px-4 py-4 text-center text-gray-500">
+                      <td colSpan={10} className="px-4 py-4 text-center text-gray-500">
                         No sessions logged yet.
                       </td>
                     </tr>
                   ) : (
                     dailyRows.map((row) => (
-                      <tr key={`${row.dateKey}-${row.batchId}`} className="hover:bg-gray-50">
+                      <tr key={row.entryId} className="hover:bg-gray-50">
                         <td className={TD}>{formatDateKey(row.dateKey)}</td>
                         <td className={TD}>{row.batchName || 'N/A'}</td>
-                        <td className={TD}>{row.trainers.join(', ')}</td>
-                        <td className={TD}>{row.topics.length ? row.topics.join(', ') : '—'}</td>
+                        <td className={TD}>{row.trainers[0]}</td>
+                        <td className={TD}>{row.topics[0] || '—'}</td>
+                        <td className={TD}>{row.module || '—'}</td>
 
                         <td className="px-4 py-3 text-sm">
                           {row.covered.length ? (
                             <div className="flex flex-wrap gap-1.5">
-                              {row.covered.map((lesson) => (
-                                <span
-                                  key={lesson}
-                                  className="rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-800"
-                                >
-                                  {lesson}
-                                </span>
-                              ))}
+                              {row.covered.map((lesson) => {
+                                const moved = row.mappedTo.includes(lesson);
+                                return (
+                                  <span
+                                    key={lesson}
+                                    title={moved ? 'Moved from extra by admin' : undefined}
+                                    className={`rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-800 ${
+                                      moved ? 'ring-1 ring-green-600' : ''
+                                    }`}
+                                  >
+                                    {lesson}
+                                  </span>
+                                );
+                              })}
                             </div>
                           ) : (
                             <span className="text-gray-400">—</span>
@@ -844,7 +976,8 @@ const Mapping = () => {
                               {row.extra.map((lesson) => (
                                 <span
                                   key={lesson}
-                                  className="rounded-full bg-orange-100 px-3 py-1 text-xs font-medium text-orange-800"
+                                  title={lesson}
+                                  className="max-w-md rounded-2xl bg-orange-100 px-3 py-1 text-xs font-medium text-orange-800"
                                 >
                                   {lesson}
                                 </span>
@@ -857,6 +990,24 @@ const Mapping = () => {
 
                         <td className={TDC}>{row.hours.toFixed(1)}</td>
                         <td className={TDC}>{row.students ?? '—'}</td>
+
+                        <td className={TDC}>
+                          {(row.extra.length > 0 ||
+                            row.mappings.length > 0 ||
+                            row.splits.length > 0 ||
+                            row.ignored.length > 0) && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setExtraError(null);
+                                setManageEntryId(row.entryId);
+                              }}
+                              className="rounded-md border border-blue-900 px-3 py-1 text-xs font-medium text-blue-900 hover:bg-blue-50"
+                            >
+                              Manage extra
+                            </button>
+                          )}
+                        </td>
                       </tr>
                     ))
                   )}
@@ -865,7 +1016,7 @@ const Mapping = () => {
             </div>
 
             <p className="mt-3 text-xs text-gray-500">
-              Student count shown is the <strong>highest</strong> single-session count for that batch/day (not summed across sessions).
+              Each row is one entry. Lessons the admin has moved out of "extra" (outlined in green) count as covered.
             </p>
           </section>
 
@@ -992,6 +1143,18 @@ const Mapping = () => {
         </div>
       )}
 
+      {/* Manage extra window */}
+      {manageRow && (
+        <ManageExtraModal
+          key={manageRow.entryId}
+          row={manageRow}
+          tree={curriculumTreeForBatch(curriculum, manageRow.batchId)}
+          saving={savingExtra}
+          error={extraError}
+          onSave={saveExtraMappings}
+          onClose={() => setManageEntryId(null)}
+        />
+      )}
     </div>
   );
 };
