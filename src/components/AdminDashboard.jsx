@@ -8,7 +8,6 @@ import EntryListForAdmin from './EntryListForAdmin';
 import ChangePasswordForm from './ChangePasswordForm';
 import Mapping from './Mapping';
 import CurriculumManager from './curriculumManager';
-import TalentShortlist from './ShortList';
 import TrainerInvoice from './TrainerInvoice';
 
 const AdminDashboard = () => {

@@ -1,7 +1,17 @@
 import { useState, useEffect, useCallback } from 'react';
 import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
 import { db } from '../services/firebase';
-import { exportToPDF, exportToExcel, exportToWord } from '../services/exportService';
+import {
+  exportToPDF,
+  exportToExcel,
+  exportToWord,
+  exportClosureReport,
+  entryDateToJS,
+  parseInputDate
+} from '../services/exportService';
+
+// TODO: fill in your company name
+const COMPANY_NAME = 'Company Name';
 
 const EntryListForAdmin = () => {
   const [entries, setEntries] = useState([]);
@@ -10,6 +20,7 @@ const EntryListForAdmin = () => {
   const [batches, setBatches] = useState([]);
   const [trainers, setTrainers] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [generatingReport, setGeneratingReport] = useState(false);
   const [filters, setFilters] = useState({
   project: '',
   campus: '',
@@ -19,6 +30,14 @@ const EntryListForAdmin = () => {
   endDate: ''
   });
   const [projectHasCampuses, setProjectHasCampuses] = useState(true);
+
+  // Closure report needs: project, (campus if the project has campuses), start date and end date
+  const canGenerateClosureReport = Boolean(
+    filters.project &&
+    (!projectHasCampuses || filters.campus) &&
+    filters.startDate &&
+    filters.endDate
+  );
   
   const fetchEntries = useCallback(async () => {
     setLoading(true);
@@ -233,6 +252,60 @@ const EntryListForAdmin = () => {
     }
   };
 
+  const handleClosureReport = async () => {
+    if (!canGenerateClosureReport || generatingReport) return;
+
+    const start = parseInputDate(filters.startDate);
+    const end = parseInputDate(filters.endDate);
+    end.setHours(23, 59, 59, 999);
+
+    if (start > end) {
+      alert('Start date cannot be after end date.');
+      return;
+    }
+
+    setGeneratingReport(true);
+    try {
+      // Dedicated fetch: only project + campus + dates (ignores batch/trainer filters).
+      // Dates are filtered in JS so no Firestore composite index is needed.
+      const constraints = [where('projectId', '==', filters.project)];
+      if (filters.campus && projectHasCampuses) {
+        constraints.push(where('campusId', '==', filters.campus));
+      }
+      const snap = await getDocs(query(collection(db, 'entries'), ...constraints));
+
+      const reportEntries = [];
+      snap.forEach((d) => {
+        const entry = { id: d.id, ...d.data() };
+        const entryDate = entryDateToJS(entry.date);
+        if (entryDate && entryDate >= start && entryDate <= end) {
+          reportEntries.push(entry);
+        }
+      });
+
+      if (reportEntries.length === 0) {
+        alert('No entries found for the selected project, campus and date range.');
+        return;
+      }
+
+      const project = projects.find(p => p.id === filters.project);
+      const campus = campuses.find(c => c.id === filters.campus);
+
+      await exportClosureReport(reportEntries, {
+        companyName: COMPANY_NAME,
+        projectName: project ? project.name : '',
+        campusName: campus && projectHasCampuses ? campus.name : '',
+        startDate: filters.startDate,
+        endDate: filters.endDate
+      });
+    } catch (error) {
+      console.error('Error generating closure report:', error);
+      alert('Could not generate the closure report. Please check the console for details.');
+    } finally {
+      setGeneratingReport(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex justify-center items-center h-64">
@@ -327,7 +400,7 @@ const EntryListForAdmin = () => {
           </select>
         </div>
         
-        <div className="flex flex-col justify-end">
+        <div className={`flex flex-col justify-end ${canGenerateClosureReport ? 'lg:col-span-2' : ''}`}>
           <label className="block text-sm font-medium text-gray-700 mb-1 invisible">Export</label>
           <div className="flex space-x-2">
             <button 
@@ -348,6 +421,15 @@ const EntryListForAdmin = () => {
             >
               Word
             </button>
+            {canGenerateClosureReport && (
+              <button
+                onClick={handleClosureReport}
+                disabled={generatingReport}
+                className="flex-[1.5] px-3 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 text-sm whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {generatingReport ? 'Generating...' : 'Closure Report'}
+              </button>
+            )}
           </div>
         </div>
       </div>
