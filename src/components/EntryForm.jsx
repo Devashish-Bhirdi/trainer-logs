@@ -646,12 +646,13 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
                 }
               }}
               className="flex-1 p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-              placeholder="Taught something not listed? Type it and press Enter"
+              placeholder="Taught something not listed? Type it and press Enter or the Add button"
             />
             <button
               type="button"
               onClick={addExtraLesson}
-              className="px-4 py-2 bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300 text-sm"
+              disabled={!extraInput.trim()}
+              className="px-4 py-2 rounded-md text-sm transition-colors bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed disabled:hover:bg-gray-200"
             >
               Add
             </button>
