@@ -59,6 +59,52 @@ const normalizeSplits = (list) =>
 const normalizeIgnored = (list) =>
   (Array.isArray(list) ? list : []).filter((x) => typeof x === 'string' && x.trim());
 
+// What did this session teach? Returns:
+//   items : one per lesson text, each with the (topic, module) pair(s) it should be looked up in
+//   pairs : every (topic, module) the session covered
+//
+// - Entries WITH a `coverage` field (new form): every ticked lesson is looked up in its own module,
+//   so a session that covered several modules is matched correctly. "Extra lessons" typed by the
+//   trainer have no module, so they are tried against all the modules of the session.
+// - Entries WITHOUT `coverage` (older entries): exactly as before, a flat `lessons` list looked up
+//   under the entry's single topic / module.
+const sessionItems = (entry) => {
+  const groups = (Array.isArray(entry.coverage) ? entry.coverage : []).filter(
+    (g) => g && Array.isArray(g.lessons)
+  );
+
+  if (groups.length > 0) {
+    const pairs = [];
+    const seenPairs = new Set();
+    groups.forEach((g) => {
+      const k = `${norm(g.topic)}||${norm(g.module)}`;
+      if (seenPairs.has(k)) return;
+      seenPairs.add(k);
+      pairs.push({ topic: g.topic, module: g.module });
+    });
+
+    const items = [];
+    const ticked = new Set();
+    groups.forEach((g) => {
+      g.lessons.forEach((text) => {
+        ticked.add(norm(text));
+        items.push({ text, pairs: [{ topic: g.topic, module: g.module }] });
+      });
+    });
+    // an extra that repeats a ticked lesson would be counted twice, so skip it
+    (Array.isArray(entry.extraLessons) ? entry.extraLessons : []).forEach((text) => {
+      if (!ticked.has(norm(text))) items.push({ text, pairs });
+    });
+
+    return { items, pairs };
+  }
+
+  // older entries saved a single "subtopic" text instead of a lessons list
+  const lessons = Array.isArray(entry.lessons) ? entry.lessons : (entry.subtopic ? [entry.subtopic] : []);
+  const pairs = [{ topic: entry.topic, module: entry.module }];
+  return { items: lessons.map((text) => ({ text, pairs })), pairs };
+};
+
 // Compares the curriculum with the trainers' entries.
 //   - a lesson in an entry counts as covered when (batch, topic, module, lesson) exists in the curriculum
 //   - an extra text may be split by the admin (entry.extraSplits) into smaller pieces,
@@ -107,10 +153,9 @@ const buildMapping = (entries, curriculumDocs, getTrainerName, batchFilter = '')
   const dailyRows = [];
 
   entries.forEach((entry) => {
-    // older entries saved a single "subtopic" text instead of a lessons list
-    const lessons = Array.isArray(entry.lessons) ? entry.lessons : (entry.subtopic ? [entry.subtopic] : []);
+    const { items, pairs } = sessionItems(entry);
     const hours = Number(entry.hours) || 0;
-    const perLesson = lessons.length ? hours / lessons.length : 0;
+    const perLesson = items.length ? hours / items.length : 0;
 
     // admin decisions: "extra text" -> one or more real curriculum lessons
     const mappings = normalizeMappings(entry.extraMappings);
@@ -128,13 +173,25 @@ const buildMapping = (entries, curriculumDocs, getTrainerName, batchFilter = '')
     const extra = [];
     const mappedTo = [];
     const rawExtras = [];   // original texts that still need the admin's attention (or were handled by them)
+    const coveredGroups = new Map();   // "topic||module" -> { topic, module, lessons } for the table
 
-    lessons.forEach((lesson) => {
+    items.forEach(({ text: lesson, pairs: itemPairs }) => {
       // everything a piece of text counts as: itself, or the lessons the admin mapped it to
       const resolve = (text) => {
         const hits = [];
-        const ownKey = lessonKey(entry.batchId, entry.topic, entry.module, text);
-        const own = curriculumLessons.get(ownKey);
+
+        let ownKey = '';
+        let own = null;
+        for (const p of itemPairs) {
+          const k = lessonKey(entry.batchId, p.topic, p.module, text);
+          const found = curriculumLessons.get(k);
+          if (found) {
+            ownKey = k;
+            own = found;
+            break;
+          }
+        }
+
         if (own) {
           hits.push({ key: ownKey, match: own, viaMapping: false });
         } else {
@@ -171,9 +228,18 @@ const buildMapping = (entries, curriculumDocs, getTrainerName, batchFilter = '')
             (hoursByGroup[groupKey] || 0) + perLesson / counted / hits.length;
           covered.push(match.lesson);       // use the curriculum's own spelling
           if (viaMapping) mappedTo.push(match.lesson);
+
+          const displayKey = `${norm(match.topic)}||${norm(match.module)}`;
+          if (!coveredGroups.has(displayKey)) {
+            coveredGroups.set(displayKey, { topic: match.topic, module: match.module, lessons: [] });
+          }
+          coveredGroups.get(displayKey).lessons.push(match.lesson);
         });
       });
     });
+
+    const taughtTopics = unique(pairs.map((p) => p.topic).filter(Boolean));
+    const taughtModules = unique(pairs.map((p) => p.module).filter(Boolean));
 
     dailyRows.push({
       entryId: entry.id,
@@ -181,9 +247,12 @@ const buildMapping = (entries, curriculumDocs, getTrainerName, batchFilter = '')
       batchId: entry.batchId,
       batchName: entry.batchName || '',
       trainers: [getTrainerName(entry)],   // kept as arrays so the Excel export keeps working
-      topics: entry.topic ? [entry.topic] : [],
-      module: entry.module || '',
+      topics: taughtTopics,
+      modules: taughtModules,              // every module taught in the session
+      module: taughtModules.join(', '),    // the same, as one text
+      taught: pairs,                       // every (topic, module) taught, used by the Manage extra window
       covered: unique(covered),
+      coveredGroups: [...coveredGroups.values()].map((g) => ({ ...g, lessons: unique(g.lessons) })),
       mappedTo: unique(mappedTo),
       extra: unique(extra),
       rawExtras: unique(rawExtras),
@@ -300,6 +369,18 @@ const TH = 'px-4 py-3 text-left text-xs font-semibold text-white';
 const THC = 'px-4 py-3 text-center text-xs font-semibold text-white';
 const TD = 'px-4 py-3 whitespace-nowrap text-sm text-gray-900';
 const TDC = 'px-4 py-3 whitespace-nowrap text-sm text-gray-900 text-center';
+
+// one green lesson chip; outlined when the admin moved it out of "extra"
+const LessonChip = ({ lesson, moved }) => (
+  <span
+    title={moved ? 'Moved from extra by admin' : undefined}
+    className={`rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-800 ${
+      moved ? 'ring-1 ring-green-600' : ''
+    }`}
+  >
+    {lesson}
+  </span>
+);
 
 const Mapping = () => {
   const [entries, setEntries] = useState([]);
@@ -758,6 +839,37 @@ const Mapping = () => {
     );
   };
 
+  // "Lessons covered" cell of the daily table.
+  // One module: the plain chips, as always. Several modules: chips grouped under each module's name.
+  const renderCoveredCell = (row) => {
+    if (row.covered.length === 0) return <span className="text-gray-400">—</span>;
+
+    if (row.modules.length > 1 && row.coveredGroups.length > 0) {
+      return (
+        <div className="space-y-2">
+          {row.coveredGroups.map((g) => (
+            <div key={`${g.topic}||${g.module}`}>
+              <div className="mb-1 text-xs font-semibold text-gray-600">{g.module}</div>
+              <div className="flex flex-wrap gap-1.5">
+                {g.lessons.map((lesson) => (
+                  <LessonChip key={lesson} lesson={lesson} moved={row.mappedTo.includes(lesson)} />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    return (
+      <div className="flex flex-wrap gap-1.5">
+        {row.covered.map((lesson) => (
+          <LessonChip key={lesson} lesson={lesson} moved={row.mappedTo.includes(lesson)} />
+        ))}
+      </div>
+    );
+  };
+
   return (
     <div>
       <h2 className="text-xl font-semibold text-gray-800 mb-4 md:mb-6">
@@ -943,31 +1055,14 @@ const Mapping = () => {
                         <td className={TD}>{formatDateKey(row.dateKey)}</td>
                         <td className={TD}>{row.batchName || 'N/A'}</td>
                         <td className={TD}>{row.trainers[0]}</td>
-                        <td className={TD}>{row.topics[0] || '—'}</td>
-                        <td className={TD}>{row.module || '—'}</td>
-
-                        <td className="px-4 py-3 text-sm">
-                          {row.covered.length ? (
-                            <div className="flex flex-wrap gap-1.5">
-                              {row.covered.map((lesson) => {
-                                const moved = row.mappedTo.includes(lesson);
-                                return (
-                                  <span
-                                    key={lesson}
-                                    title={moved ? 'Moved from extra by admin' : undefined}
-                                    className={`rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-800 ${
-                                      moved ? 'ring-1 ring-green-600' : ''
-                                    }`}
-                                  >
-                                    {lesson}
-                                  </span>
-                                );
-                              })}
-                            </div>
-                          ) : (
-                            <span className="text-gray-400">—</span>
-                          )}
+                        <td className={TD}>{row.topics.length ? row.topics.join(', ') : '—'}</td>
+                        <td className={TD}>
+                          {row.modules.length
+                            ? row.modules.map((m) => <div key={m}>{m}</div>)
+                            : '—'}
                         </td>
+
+                        <td className="px-4 py-3 text-sm">{renderCoveredCell(row)}</td>
 
                         <td className="px-4 py-3 text-sm">
                           {row.extra.length ? (
@@ -1016,6 +1111,7 @@ const Mapping = () => {
 
             <p className="mt-3 text-xs text-gray-500">
               Each row is one entry. Lessons the admin has moved out of "extra" (outlined in green) count as covered.
+              When a session covered more than one module, the lessons are grouped under their module.
             </p>
           </section>
 
