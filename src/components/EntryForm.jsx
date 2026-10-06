@@ -362,8 +362,8 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
         endTime,
         hours,              // the session's hours, stored once (not split per module)
         studentCount: parseInt(studentCount, 10),
-        trainerId: currentUser.uid,
-        trainerName: currentUser.displayName || currentUser.email,
+        trainerId: initialEntry?.trainerId || currentUser.uid,
+        trainerName: initialEntry?.trainerName || currentUser.displayName || currentUser.email,
       };
 
       if (initialEntry && initialEntry.id) {
@@ -398,7 +398,9 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
 
   return (
     <div >
-      <h2 className="text-xl font-semibold text-gray-800 mb-4 md:mb-6">Add Work Entry</h2>
+      <h2 className="text-xl font-semibold text-gray-800 mb-4 md:mb-6">
+        {initialEntry ? 'Edit Work Entry' : 'Add Work Entry'}
+      </h2>
 
       {message && (
         <div className={`mb-4 p-3 rounded-md text-sm md:text-base ${

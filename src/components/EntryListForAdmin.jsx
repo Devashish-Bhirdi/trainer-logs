@@ -9,6 +9,7 @@ import {
   entryDateToJS,
   parseInputDate
 } from '../services/exportService';
+import EntryForm from './EntryForm';
 
 // TODO: fill in your company name
 const COMPANY_NAME = 'Company Name';
@@ -30,6 +31,14 @@ const EntryListForAdmin = () => {
   endDate: ''
   });
   const [projectHasCampuses, setProjectHasCampuses] = useState(true);
+  const [editingEntry,setEditingEntry] = useState(null);
+
+  const handleEdit = (entry) => setEditingEntry(entry);
+
+  const handleEditSaved = () => {
+    setEditingEntry(null);
+    fetchEntries();
+  }
 
   // Closure report needs: project, (campus if the project has campuses), start date and end date
   const canGenerateClosureReport = Boolean(
@@ -455,12 +464,13 @@ const EntryListForAdmin = () => {
               <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Trainer</th>
               <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Topic</th>
               <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Hours</th>
+              <th className='px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-width'>Actions</th>
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
             {entries.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-4 py-4 text-center text-gray-500">
+                <td colSpan={8} className="px-4 py-4 text-center text-gray-500">
                   No entries found
                 </td>
               </tr>
@@ -486,12 +496,32 @@ const EntryListForAdmin = () => {
                       <div className="text-gray-500 text-xs">{entry.studentCount} students</div>
                     )}
                   </td>
+                  <td className='px-4 py-4 whitespace-nowrap text-sm'>
+                    <button
+                      onClick={() => handleEdit(entry)}
+                      className='px-3 py-1 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-xs'
+                      >
+                      Edit  
+                    </button>
+                  </td>
                 </tr>
               ))
             )}
           </tbody>
         </table>
       </div>
+      {editingEntry && (
+        <div className='fixed inset-0 z-50 bg-black/50 overflow-y-auto p-4'>
+          <div className='bg-white rounded-xl shadow-xl max-w-4xl mx-auto my-8 p-6'>
+            <EntryForm
+              key={editingEntry.id}
+              initialEntry={editingEntry}
+              onSaved={handleEditSaved}
+              onCancel={() => setEditingEntry(null)}
+              />
+          </div>
+        </div>
+      )}
     </div>
   );
 };
