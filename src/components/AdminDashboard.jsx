@@ -9,6 +9,7 @@ import ChangePasswordForm from './ChangePasswordForm';
 import Mapping from './Mapping';
 import CurriculumManager from './curriculumManager';
 import TrainerInvoice from './TrainerInvoice';
+// import FixEntriesProject from './fixEntriesProject';
 
 const AdminDashboard = () => {
   const [activeTab, setActiveTab] = useState('entries');
@@ -661,6 +662,16 @@ const AdminDashboard = () => {
               </svg>
                Trainer Invoice
             </button>
+            {/* <button
+            onClick={() => setActiveTab('fixentries')}
+            className={`py-2 px-4 sm:py-3 sm:px-6 rounded-lg font-medium text-sm flex items-center transition-all duration-200 
+              ${
+                activeTab === 'fixentries'
+                ? 'bg-blue-100 text-blue-700 shadow-inner'
+                : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+              }`}>
+                Fix Entries
+            </button> */}
           </nav>
         </div>
 
@@ -678,6 +689,8 @@ const AdminDashboard = () => {
 
           {activeTab === 'trainerInvoice' && <TrainerInvoice/>}
           
+          {/* {activeTab === 'fixentries' && <FixEntriesProject/>} */}
+
           {activeTab === 'addTrainer' && (
             <div className="space-y-6">
               <h2 className="text-xl font-semibold text-gray-800 mb-2">Add New Trainer</h2>
