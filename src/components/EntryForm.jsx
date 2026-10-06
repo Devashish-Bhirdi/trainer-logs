@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { addDoc, collection, getDocs, query, where, doc, updateDoc } from 'firebase/firestore';
+// import { addDoc, collection, getDocs, query, where, doc, updateDoc } from 'firebase/firestore';
 import { db } from '../services/firebase';
 import { useAuth } from '../hooks/useAuth';
+import { addDoc, collection, getDocs, getDoc, query, where, doc, updateDoc } from 'firebase/firestore';
 
 // Removes repeats (case-insensitive) but keeps the original order
 const dedupe = (list) => {
@@ -39,6 +40,38 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
   const [curriculumLoading, setCurriculumLoading] = useState(false);
 
   const { currentUser } = useAuth();
+  // Admins (anyone whose role is set and is not 'trainer') editing an EXISTING entry don't need
+  // curriculum data. Old entries were created before the curriculum feature existed.
+  // A missing role never counts as privileged. NOTE: this is a UI rule only, enforce it in Firestore rules too.
+  const [role,setRole] = useState(null);
+  const [roleLoading,setRoleLoading] = useState(true);
+
+  useEffect(() => {
+  if (!currentUser) {
+    setRole(null);
+    setRoleLoading(false);
+    return;
+  }
+
+  let cancelled = false;
+  const loadRole = async () => {
+    setRoleLoading(true);
+    try {
+      const snap = await getDoc(doc(db, 'users', currentUser.uid));
+      if (!cancelled) setRole(snap.exists() ? snap.data().role || null : null);
+    } catch (error) {
+      console.error('Error loading user role:', error);
+      if (!cancelled) setRole(null);
+    } finally {
+      if (!cancelled) setRoleLoading(false);
+    }
+  };
+  loadRole();
+
+  return () => { cancelled = true; };
+}, [currentUser]);
+
+const isPrivilegedEdit = Boolean(initialEntry) && Boolean(role) && role !== 'trainer';
 
   // Everything below is derived from the fetched curriculum documents - no extra fetching per dropdown.
   // Each document holds { topic: { module: [lessons] } }; merge all that apply to this batch into one map.
@@ -255,16 +288,19 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
   };
 
   // ---------- Validation: every field must be filled before the form can be submitted ----------
+  // Topic, lessons and description are skipped for admin edits (old entries may not have them).
 
   const missingFields = [];
   if (!date) missingFields.push('Date');
   if (!project) missingFields.push('Project');
   if (projectHasCampuses && !campus) missingFields.push('Campus');
   if (!batch) missingFields.push('Batch');
-  if (!topic) missingFields.push('Topic');
-  // The module(s) are worked out from the ticked lessons, so at least one lesson from the list is needed
-  if (topic && coverage.length === 0) missingFields.push('Lessons (tick at least one)');
-  if (!description.trim()) missingFields.push('Description');
+  if (!isPrivilegedEdit) {
+    if (!topic) missingFields.push('Topic');
+    // The module(s) are worked out from the ticked lessons, so at least one lesson from the list is needed
+    if (topic && coverage.length === 0) missingFields.push('Lessons (tick at least one)');
+    if (!description.trim()) missingFields.push('Description');
+  }
   if (!startTime) missingFields.push('Start time');
   if (!endTime) missingFields.push('End time');
   if (startTime && endTime && Number(calculateHours()) <= 0) missingFields.push('End time after start time');
@@ -334,7 +370,29 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
     // Anything typed in the "Extra lessons" box but not yet added still counts
     const pending = extraInput.trim();
     const extras = dedupe(pending ? [...extraLessons, pending] : extraLessons);
-    const lessons = dedupe([...coverage.flatMap((c) => c.lessons), ...extras]);
+
+    // Admin edit with nothing ticked (old entry, or no curriculum for this batch): keep the entry's
+    // original coverage/module/lessons instead of wiping them. Only done when the topic is unchanged
+    // (or was cleared by changing the batch), so old data is never attached to a different topic.
+    const keepOriginal =
+      isPrivilegedEdit &&
+      coverage.length === 0 &&
+      (!topic || topic === initialEntry.topic);
+
+    const originalExtras = initialEntry?.extraLessons || [];
+    const finalCoverage = coverage.length > 0
+      ? coverage
+      : keepOriginal && Array.isArray(initialEntry.coverage)
+        ? initialEntry.coverage
+        : [];
+    const baseLessons = coverage.length > 0
+      ? coverage.flatMap((c) => c.lessons)
+      : keepOriginal
+        ? (initialEntry.lessons || []).filter((l) => !originalExtras.includes(l))
+        : [];
+    const lessons = dedupe([...baseLessons, ...extras]);
+    const finalTopic = topic || (isPrivilegedEdit ? (initialEntry.topic || '') : '');
+    const finalModule = finalCoverage[0]?.module || (keepOriginal ? (initialEntry.module || '') : '');
 
     setLoading(true);
 
@@ -351,10 +409,10 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
         campusName: projectHasCampuses ? (selectedCampusData?.name || '') : '',
         batchId: batch,
         batchName: selectedBatchData?.name || '',
-        coverage,                                   // [{ topic, module, lessons }] - one item per module taught
-        moduleKeys: coverage.map((c) => `${c.topic}||${c.module}`), // lets you query with array-contains
-        topic,                                      // the session's topic
-        module: coverage[0].module,                 // first module, kept so existing screens don't break
+        coverage: finalCoverage,                    // [{ topic, module, lessons }] - one item per module taught
+        moduleKeys: finalCoverage.map((c) => `${c.topic}||${c.module}`), // lets you query with array-contains
+        topic: finalTopic,                          // the session's topic
+        module: finalModule,                        // first module, kept so existing screens don't break
         lessons,            // lessons from every module + extra lessons, combined
         extraLessons: extras, // just the extra ones, so they can be told apart later
         description: description.trim(), // the whole text as one string
@@ -415,6 +473,13 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
       {notice && (
         <div className="mb-4 p-3 rounded-md text-sm text-amber-700 bg-amber-50 border border-amber-200">
           {notice}
+        </div>
+      )}
+
+      {isPrivilegedEdit && (
+        <div className="mb-4 p-3 rounded-md text-sm text-blue-700 bg-blue-50 border border-blue-200">
+          Editing as admin: topic, lessons and description are optional. If you don't change the topic
+          or tick any lessons, the entry's existing topic and lessons are kept as they are.
         </div>
       )}
 
@@ -521,7 +586,9 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
 
         {batch && !curriculumLoading && curriculumDocs.length === 0 && (
           <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-3">
-            No curriculum has been added for this batch yet. Add it from the Mapping page first.
+            {isPrivilegedEdit
+              ? 'No curriculum has been added for this batch. You can still save this entry as admin.'
+              : 'No curriculum has been added for this batch yet. Add it from the Mapping page first.'}
           </p>
         )}
 
@@ -533,10 +600,14 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
               value={topic}
               onChange={(e) => handleTopicChange(e.target.value)}
               className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100"
-              required
+              required={!isPrivilegedEdit}
               disabled={!batch || topics.length === 0}
             >
               <option value="">{!batch ? 'Select Batch First' : 'Select Topic'}</option>
+              {/* Admin editing: show the entry's current topic even if the curriculum doesn't list it */}
+              {isPrivilegedEdit && topic && !topics.includes(topic) && (
+                <option value={topic}>{topic} (not in current curriculum)</option>
+              )}
               {topics.map(t => (
                 <option key={t} value={t}>{t}</option>
               ))}
@@ -556,6 +627,11 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
 
           {!topic ? (
             <p className="text-sm text-gray-500">Select a topic to see its modules and lessons.</p>
+          ) : modules.length === 0 ? (
+            <p className="text-sm text-gray-500">
+              This topic isn't in the curriculum for this batch.
+              {isPrivilegedEdit && " The entry's existing lessons will be kept."}
+            </p>
           ) : (
             <>
               <div className="border border-gray-300 rounded-md divide-y divide-gray-200 overflow-hidden">
@@ -627,7 +703,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             rows={3}
-            required
+            required={!isPrivilegedEdit}
             className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
             placeholder="Briefly describe what was covered in this session"
           />
