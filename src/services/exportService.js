@@ -16,7 +16,8 @@ import {
   ShadingType,
   TableLayoutType,
   VerticalAlign,
-  HeadingLevel
+  HeadingLevel,
+  PageBreak
 } from 'docx';
 import { collection, query, where, getDocs } from 'firebase/firestore';
 import { db } from './firebase';
@@ -635,9 +636,11 @@ const pdfSummaryFontSize = (n) => {
 const renderClosurePDF = (report, meta) => {
   const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
   const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
   const margin = 14;
   const usable = pageW - margin * 2;
   const PT_TO_MM = 0.3528;
+  const MIN_SPACE_FOR_BATCH = 60; // mm needed for title + trainers + header + 1 row
 
   let y = 45;
   const centered = (text, size, style, color, gap) => {
@@ -692,9 +695,21 @@ const renderClosurePDF = (report, meta) => {
   });
 
   // ---- Batch pages ----
-  report.batches.forEach((batch) => {
-    doc.addPage();
-    let by = 22;
+  report.batches.forEach((batch, idx) => {
+    // First batch always starts on a new page (page 1 holds the summary).
+    // Others follow meta.batchBreaks[batch.name]; default is a new page.
+    let startNewPage = idx === 0 ? true : (meta.batchBreaks?.[batch.name] ?? true);
+    let by;
+
+    if (!startNewPage) {
+      by = doc.lastAutoTable.finalY + 12;
+      // Not enough room left on this page -> fall back to a new page
+      if (by > pageH - MIN_SPACE_FOR_BATCH) startNewPage = true;
+    }
+    if (startNewPage) {
+      doc.addPage();
+      by = 22;
+    }
 
     // Subtitle: Batch - name (blue)
     doc.setFontSize(16);
@@ -705,28 +720,28 @@ const renderClosurePDF = (report, meta) => {
     doc.text(subLines, pageW / 2, by, { align: 'center' });
     by += subLines.length * 16 * PT_TO_MM * 1.25 + 3;
 
-    // H2: Trainers: (bold) + names
+    // Trainers: (bold) + names
     doc.setFontSize(12);
     doc.setTextColor(30, 30, 30);
     const label = 'Trainers:';
 
     doc.setFont('helvetica', 'bold');
-    const labelW = doc.getTextWidth(label) +2;
-    
+    const labelW = doc.getTextWidth(label) + 2;
+
     doc.setFont('helvetica', 'normal');
     const trainerLines = doc.splitTextToSize(batch.trainers.join(', ') || '-', usable - labelW);
 
     const firstLineW = doc.getTextWidth(trainerLines[0]);
-    const startX = (pageW - (labelW+firstLineW)) / 2;
-    
-    doc.setFont('helvetica','bold');
-    doc.text(label,startX,by);
+    const startX = (pageW - (labelW + firstLineW)) / 2;
 
-    doc.setFont('helvetica','normal');
-    doc.text(trainerLines,startX + labelW,by);
+    doc.setFont('helvetica', 'bold');
+    doc.text(label, startX, by);
 
-    for(let i = 1;i < trainerLines.length;i++){
-      doc.text(trainerLines[i],pageW / 2, by + i * 12 * PT_TO_MM*1.3, {align:'center'});
+    doc.setFont('helvetica', 'normal');
+    doc.text(trainerLines[0], startX + labelW, by);
+
+    for (let i = 1; i < trainerLines.length; i++) {
+      doc.text(trainerLines[i], pageW / 2, by + i * 12 * PT_TO_MM * 1.3, { align: 'center' });
     }
     by += trainerLines.length * 12 * PT_TO_MM * 1.3 + 4;
 
@@ -811,6 +826,7 @@ const centeredPara = (text, { size, bold = false, color = '000000', before = 0, 
 
 const renderClosureWord = async (report, meta) => {
   const children = [];
+  const spacer = () => new Paragraph({ spacing: { before: 0, after: 0 }, children: [] });
 
   // ---- Page 1: headers ----
   children.push(centeredPara(meta.companyName || 'Company Name', { size: 48, bold: true, color: '282828', before: 1800, after: 160 }));
@@ -857,24 +873,35 @@ const renderClosureWord = async (report, meta) => {
       rows: summaryRows
     })
   );
+  children.push(spacer()); // gap after the summary table
 
   // ---- Batch sections ----
   const entryColW = [1700, 2000, 1700, 4166, 900]; // sums to 10466
   const entryHead = ['Date', 'Trainer', 'Domain', 'Topics Covered', 'Students'];
 
-  report.batches.forEach((batch) => {
+  report.batches.forEach((batch, idx) => {
+    // First batch always starts on a new page (page 1 holds the summary).
+    // Others follow meta.batchBreaks[batch.name]; default is a new page.
+    const startNewPage = idx === 0 ? true : (meta.batchBreaks?.[batch.name] ?? true);
+
     children.push(
       new Paragraph({
-        pageBreakBefore: true,
         alignment: AlignmentType.CENTER,
-        spacing: { after: 120 },
-        children: [new TextRun({ text: `Batch - ${batch.name}`, bold: true, color: BLUE_HEX, size: 32 })]
+        keepNext: true,
+        spacing: { before: startNewPage ? 0 : 240, after: 120 },
+        children: [
+          // A real, visible page-break character the admin can delete in Word
+          ...(startNewPage ? [new PageBreak()] : []),
+          new TextRun({ text: `Batch - ${batch.name}`, bold: true, color: BLUE_HEX, size: 32 })
+        ]
       })
     );
+
     children.push(
       new Paragraph({
         heading: HeadingLevel.HEADING_2,
         alignment: AlignmentType.CENTER,
+        keepNext: true,
         spacing: { before: 0, after: 200 },
         children: [
           new TextRun({ text: 'Trainers: ', bold: true, color: '1E1E1E', size: 24 }),
@@ -891,8 +918,8 @@ const renderClosureWord = async (report, meta) => {
           wCell(h, { width: entryColW[i], bold: true, color: 'FFFFFF', fill: BLUE_HEX, size: 20 })
         )
       }),
-      ...batch.rows.map((r, idx) => {
-        const fill = idx % 2 === 0 ? GREY_HEX : 'FFFFFF';
+      ...batch.rows.map((r, rIdx) => {
+        const fill = rIdx % 2 === 0 ? GREY_HEX : 'FFFFFF';
         const cells = [formatTableDate(r.date), r.trainer, r.domain, r.topics, r.students];
         return new TableRow({
           cantSplit: true,
@@ -910,10 +937,10 @@ const renderClosureWord = async (report, meta) => {
         rows
       })
     );
-  });
 
-  // Word expects a paragraph after the final table
-  children.push(new Paragraph({ children: [] }));
+    // Free paragraph after every table so the next batch can be moved freely
+    children.push(spacer());
+  });
 
   const doc = new Document({
     sections: [
@@ -933,11 +960,6 @@ const renderClosureWord = async (report, meta) => {
   saveAs(blob, `${buildFileBase(meta)}.docx`);
 };
 
-/* ----------------------------- Public API -------------------------------- */
-
-/**
- * meta = { companyName, projectName, campusName, startDate: 'YYYY-MM-DD', endDate: 'YYYY-MM-DD' }
- */
 export const exportClosureReportPDF = async (entries, meta) => {
   const trainersMap = await fetchTrainersMap();
   renderClosurePDF(buildClosureReportData(entries, trainersMap), meta);

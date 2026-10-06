@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
+import { collection, query, where, getDocs, orderBy, onSnapshot } from 'firebase/firestore';
 import { db } from '../services/firebase';
 import {
   exportToPDF,
@@ -148,6 +148,14 @@ const EntryListForAdmin = () => {
       console.error('Error fetching trainers:', error);
     }
   };
+
+  const unsub = onSnapshot(collection(db, 'projects'), (snapshot) => {
+    snapshot.docChanges().forEach((change) => {
+      if (change.type === 'removed') {
+        console.log('Deleted:', change.doc.id)
+      }
+    })
+  })
 
   const getTrainerDisplay = (trainerId, entry) => {
     const t = trainers.find(tr => tr.id === trainerId || tr.uid === trainerId);
