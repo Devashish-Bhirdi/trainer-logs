@@ -39,6 +39,8 @@ const EntryListForAdmin = () => {
     filters.endDate
   );
   
+  const showClosureReport = Boolean(filters.project)
+
   const fetchEntries = useCallback(async () => {
     setLoading(true);
     try {
@@ -400,7 +402,7 @@ const EntryListForAdmin = () => {
           </select>
         </div>
         
-        <div className={`flex flex-col justify-end ${canGenerateClosureReport ? 'lg:col-span-2' : ''}`}>
+        <div className={`flex flex-col justify-end ${showClosureReport ? 'lg:col-span-2' : ''}`}>
           <label className="block text-sm font-medium text-gray-700 mb-1 invisible">Export</label>
           <div className="flex space-x-2">
             <button 
@@ -421,14 +423,14 @@ const EntryListForAdmin = () => {
             >
               Word
             </button>
-            {canGenerateClosureReport && (
-              <button
-                onClick={handleClosureReport}
-                disabled={generatingReport}
-                className="flex-[1.5] px-3 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 text-sm whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                {generatingReport ? 'Generating...' : 'Closure Report'}
-              </button>
+            {showClosureReport && (
+            <button
+              onClick={handleClosureReport}
+              disabled={generatingReport || !canGenerateClosureReport}
+              className="flex-[1.5] px-3 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 text-sm whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {generatingReport ? 'Generating...' : 'Closure Report'}
+            </button>
             )}
           </div>
         </div>
