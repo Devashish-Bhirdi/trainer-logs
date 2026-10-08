@@ -22,6 +22,15 @@ const CLOSURE_FORMAT_OPTIONS = [
   { value: CLOSURE_FORMATS.DATE, label: 'By Date' }
 ];
 
+// Always dd/mm/yyyy, regardless of the browser's locale
+const formatDMY = (value) => {
+  const d = entryDateToJS(value);
+  if (!d || isNaN(d.getTime())) return 'N/A';
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  return `${dd}/${mm}/${d.getFullYear()}`;
+};
+
 const EntryListForAdmin = () => {
   const [entries, setEntries] = useState([]);
   const [projects, setProjects] = useState([]);
@@ -39,6 +48,8 @@ const EntryListForAdmin = () => {
   startDate: '',
   endDate: ''
   });
+  // Dates being edited in the inputs. They only reach `filters` (and trigger a fetch) on Apply.
+  const [dateDraft, setDateDraft] = useState({ startDate: '', endDate: '' });
   const [projectHasCampuses, setProjectHasCampuses] = useState(true);
   const [editingEntry,setEditingEntry] = useState(null);
 
@@ -49,12 +60,42 @@ const EntryListForAdmin = () => {
     fetchEntries();
   }
 
-  // Closure report needs: project, (campus if the project has campuses), start date and end date
+  const datesDirty =
+    dateDraft.startDate !== filters.startDate || dateDraft.endDate !== filters.endDate;
+  const hasAnyDate = Boolean(
+    dateDraft.startDate || dateDraft.endDate || filters.startDate || filters.endDate
+  );
+
+  const applyDates = () => {
+    if (!datesDirty) return;
+    // yyyy-mm-dd strings compare correctly as text
+    if (dateDraft.startDate && dateDraft.endDate && dateDraft.startDate > dateDraft.endDate) {
+      alert('Start date cannot be after end date.');
+      return;
+    }
+    setFilters(prev => ({
+      ...prev,
+      startDate: dateDraft.startDate,
+      endDate: dateDraft.endDate
+    }));
+  };
+
+  const clearDates = () => {
+    setDateDraft({ startDate: '', endDate: '' });
+    setFilters(prev => ({ ...prev, startDate: '', endDate: '' }));
+  };
+
+  const handleDateKeyDown = (e) => {
+    if (e.key === 'Enter') applyDates();
+  };
+
+  // Closure report needs: project, (campus if the project has campuses), start date and end date.
+  // It does its own fetch, so it uses the draft dates and doesn't require clicking Apply.
   const canGenerateClosureReport = Boolean(
     filters.project &&
     (!projectHasCampuses || filters.campus) &&
-    filters.startDate &&
-    filters.endDate
+    dateDraft.startDate &&
+    dateDraft.endDate
   );
   
   const showClosureReport = Boolean(filters.project)
@@ -283,8 +324,8 @@ const EntryListForAdmin = () => {
   const handleClosureReport = async () => {
     if (!canGenerateClosureReport || generatingReport) return;
 
-    const start = parseInputDate(filters.startDate);
-    const end = parseInputDate(filters.endDate);
+    const start = parseInputDate(dateDraft.startDate);
+    const end = parseInputDate(dateDraft.endDate);
     end.setHours(23, 59, 59, 999);
 
     if (start > end) {
@@ -323,8 +364,8 @@ const EntryListForAdmin = () => {
         companyName: COMPANY_NAME,
         projectName: project ? project.name : '',
         campusName: campus && projectHasCampuses ? campus.name : '',
-        startDate: filters.startDate,
-        endDate: filters.endDate,
+        startDate: dateDraft.startDate,
+        endDate: dateDraft.endDate,
         format: closureFormat // 'batch' | 'trainer' | 'date'
       });
     } catch (error) {
@@ -335,25 +376,18 @@ const EntryListForAdmin = () => {
     }
   };
 
-  if (loading) {
-    return (
-      <div className="flex justify-center items-center h-64">
-        <div className="text-gray-600">Loading entries...</div>
-      </div>
-    );
-  }
-
   return (
     <div>
       <h2 className="text-xl font-semibold text-gray-800 mb-4 md:mb-6">All Training Entries</h2>
       
-      <div className="mb-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 md:gap-4">
-        <div>
+            <div className="mb-4 flex flex-wrap items-end gap-x-3 gap-y-3">
+        {/* Dropdown filters */}
+        <div className="w-44">
           <label className="block text-sm font-medium text-gray-700 mb-1">Project</label>
           <select
             value={filters.project || ''}
             onChange={(e) => handleFilterChange('project', e.target.value)}
-            className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+            className="w-full h-10 px-2 text-sm border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
           >
             <option value="">All Projects</option>
             {projects.map(project => (
@@ -361,14 +395,14 @@ const EntryListForAdmin = () => {
             ))}
           </select>
         </div>
-        
+
         {filters.project && projectHasCampuses && (
-          <div>
+          <div className="w-44">
             <label className="block text-sm font-medium text-gray-700 mb-1">Campus</label>
             <select
               value={filters.campus || ''}
               onChange={(e) => handleFilterChange('campus', e.target.value)}
-              className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+              className="w-full h-10 px-2 text-sm border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
             >
               <option value="">All Campuses</option>
               {campuses.map(campus => (
@@ -377,14 +411,14 @@ const EntryListForAdmin = () => {
             </select>
           </div>
         )}
-        
+
         {filters.project && (
-          <div>
+          <div className="w-44">
             <label className="block text-sm font-medium text-gray-700 mb-1">Batch</label>
             <select
               value={filters.batch || ''}
               onChange={(e) => handleFilterChange('batch', e.target.value)}
-              className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+              className="w-full h-10 px-2 text-sm border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
               disabled={projectHasCampuses && !filters.campus}
             >
               <option value="">All Batches</option>
@@ -394,31 +428,13 @@ const EntryListForAdmin = () => {
             </select>
           </div>
         )}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
-            <input
-              type="date"
-              value={filters.startDate || ''}
-              onChange={(e) => handleFilterChange('startDate', e.target.value)}
-              className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
-            <input
-              type="date"
-              value={filters.endDate || ''}
-              onChange={(e) => handleFilterChange('endDate', e.target.value)}
-              className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-            />
-          </div>
-        
-        <div>
+
+        <div className="w-44">
           <label className="block text-sm font-medium text-gray-700 mb-1">Trainer</label>
           <select
             value={filters.trainer || ''}
             onChange={(e) => handleFilterChange('trainer', e.target.value)}
-            className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+            className="w-full h-10 px-2 text-sm border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
           >
             <option value="">All Trainers</option>
             {trainers.map(trainer => (
@@ -429,54 +445,89 @@ const EntryListForAdmin = () => {
           </select>
         </div>
 
-        {/* Closure report format (only relevant once a project is selected) */}
-        {showClosureReport && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Report Format</label>
-            <select
-              value={closureFormat}
-              onChange={(e) => setClosureFormat(e.target.value)}
-              className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-            >
-              {CLOSURE_FORMAT_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </select>
-          </div>
+        {/* Date range: same row, no card */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">From</label>
+          <input
+            type="date"
+            value={dateDraft.startDate}
+            onChange={(e) => setDateDraft(prev => ({ ...prev, startDate: e.target.value }))}
+            onKeyDown={handleDateKeyDown}
+            className="h-10 px-2 text-sm border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">To</label>
+          <input
+            type="date"
+            value={dateDraft.endDate}
+            onChange={(e) => setDateDraft(prev => ({ ...prev, endDate: e.target.value }))}
+            onKeyDown={handleDateKeyDown}
+            className="h-10 px-2 text-sm border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+          />
+        </div>
+        <button
+          onClick={applyDates}
+          disabled={!datesDirty}
+          className="h-10 px-4 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-sm whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
+        >
+          Filter by dates
+        </button>
+        {hasAnyDate && (
+          <button
+            onClick={clearDates}
+            className="h-10 px-4 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300 text-sm"
+          >
+            Clear
+          </button>
         )}
-        
-        <div className={`flex flex-col justify-end ${showClosureReport ? 'lg:col-span-2' : ''}`}>
-          <label className="block text-sm font-medium text-gray-700 mb-1 invisible">Export</label>
-          <div className="flex space-x-2">
-            <button 
-              onClick={() => handleExport('pdf')} 
-              className="flex-1 px-3 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 text-sm"
-            >
-              PDF
-            </button>
-            <button 
-              onClick={() => handleExport('excel')} 
-              className="flex-1 px-3 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm"
-            >
-              Excel
-            </button>
-            <button 
-              onClick={() => handleExport('word')} 
-              className="flex-1 px-3 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-sm"
-            >
-              Word
-            </button>
-            {showClosureReport && (
+
+        {/* Exports */}
+        <div className="flex gap-2">
+          <button
+            onClick={() => handleExport('pdf')}
+            className="h-10 px-4 bg-red-600 text-white rounded-md hover:bg-red-700 text-sm"
+          >
+            PDF
+          </button>
+          <button
+            onClick={() => handleExport('excel')}
+            className="h-10 px-4 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm"
+          >
+            Excel
+          </button>
+          <button
+            onClick={() => handleExport('word')}
+            className="h-10 px-4 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-sm"
+          >
+            Word
+          </button>
+        </div>
+
+        {/* Closure report (only once a project is selected) */}
+        {showClosureReport && (
+          <>
+            <div className="w-36">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Report Format</label>
+              <select
+                value={closureFormat}
+                onChange={(e) => setClosureFormat(e.target.value)}
+                className="w-full h-10 px-2 text-sm border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+              >
+                {CLOSURE_FORMAT_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
             <button
               onClick={handleClosureReport}
               disabled={generatingReport || !canGenerateClosureReport}
-              className="flex-[1.5] px-3 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 text-sm whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
+              className="h-10 px-4 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 text-sm whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
             >
               {generatingReport ? 'Generating...' : 'Closure Report'}
             </button>
-            )}
-          </div>
-        </div>
+          </>
+        )}
       </div>
       
       <div className="overflow-x-auto">
@@ -494,7 +545,13 @@ const EntryListForAdmin = () => {
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
-            {entries.length === 0 ? (
+            {loading ? (
+              <tr>
+                <td colSpan={8} className="px-4 py-8 text-center text-gray-600">
+                  Loading entries...
+                </td>
+              </tr>
+            ) : entries.length === 0 ? (
               <tr>
                 <td colSpan={8} className="px-4 py-4 text-center text-gray-500">
                   No entries found
@@ -504,7 +561,7 @@ const EntryListForAdmin = () => {
               entries.map(entry => (
                 <tr key={entry.id} className="hover:bg-gray-50">
                   <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">
-                    {new Date(entry.date.seconds * 1000).toLocaleDateString()}
+                    {formatDMY(entry.date)}
                   </td>
                   <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">{entry.projectName}</td>
                   <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">{entry.campusName || 'N/A'}</td>
