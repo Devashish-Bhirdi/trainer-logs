@@ -7,12 +7,20 @@ import {
   exportToWord,
   exportClosureReport,
   entryDateToJS,
-  parseInputDate
+  parseInputDate,
+  CLOSURE_FORMATS
 } from '../services/exportService';
 import EntryForm from './EntryForm';
 
 // TODO: fill in your company name
 const COMPANY_NAME = 'Company Name';
+
+// Options shown in the closure report format dropdown
+const CLOSURE_FORMAT_OPTIONS = [
+  { value: CLOSURE_FORMATS.BATCH, label: 'By Batch' },
+  { value: CLOSURE_FORMATS.TRAINER, label: 'By Trainer' },
+  { value: CLOSURE_FORMATS.DATE, label: 'By Date' }
+];
 
 const EntryListForAdmin = () => {
   const [entries, setEntries] = useState([]);
@@ -22,6 +30,7 @@ const EntryListForAdmin = () => {
   const [trainers, setTrainers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [generatingReport, setGeneratingReport] = useState(false);
+  const [closureFormat, setClosureFormat] = useState(CLOSURE_FORMATS.BATCH);
   const [filters, setFilters] = useState({
   project: '',
   campus: '',
@@ -315,7 +324,8 @@ const EntryListForAdmin = () => {
         projectName: project ? project.name : '',
         campusName: campus && projectHasCampuses ? campus.name : '',
         startDate: filters.startDate,
-        endDate: filters.endDate
+        endDate: filters.endDate,
+        format: closureFormat // 'batch' | 'trainer' | 'date'
       });
     } catch (error) {
       console.error('Error generating closure report:', error);
@@ -418,6 +428,22 @@ const EntryListForAdmin = () => {
             ))}
           </select>
         </div>
+
+        {/* Closure report format (only relevant once a project is selected) */}
+        {showClosureReport && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Report Format</label>
+            <select
+              value={closureFormat}
+              onChange={(e) => setClosureFormat(e.target.value)}
+              className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+            >
+              {CLOSURE_FORMAT_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+        )}
         
         <div className={`flex flex-col justify-end ${showClosureReport ? 'lg:col-span-2' : ''}`}>
           <label className="block text-sm font-medium text-gray-700 mb-1 invisible">Export</label>
