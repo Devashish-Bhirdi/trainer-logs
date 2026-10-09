@@ -8,6 +8,13 @@ import InvoiceMatchModal from './InvoiceMatchModal';
 const trainerKey = (t) => t.uid || t.id;
 const trainerName = (t) => t.name || (t.email || '').split('@')[0] || 'Trainer';
 
+// "2026-09-01" -> 1 Sep 2026, 00:00 in the user's own time zone.
+// (new Date('2026-09-01') would be midnight UTC, which cuts off the first hours of the day in e.g. India.)
+const parseLocalDate = (ymd) => {
+  const [y, m, d] = String(ymd).split('-').map(Number);
+  return new Date(y, m - 1, d);
+};
+
 const statusStyle = {
   merged: 'text-green-700',
   skipped: 'text-orange-700',
@@ -17,7 +24,9 @@ const statusStyle = {
 /**
  * Props
  *  - trainers     : [{ id, uid, name, email }]
- *  - filters      : { project, campus, batch, startDate, endDate }  (the page's filters; trainer filter is NOT used)
+ *  - filters      : { project, campus, batch, startDate, endDate }
+ *                   project, startDate and endDate are COMPULSORY (campus and batch are optional).
+ *                   The page's trainer filter is NOT used: the pack covers all trainers.
  *  - filterLabels : { companyName, projectName, campusName, batchName, startDate, endDate }
  *  - onClose      : () => void
  */
@@ -46,20 +55,31 @@ const InvoicePackModal = ({ trainers, filters, filterLabels, onClose }) => {
   // Fetch every entry matching the page's filters (project / campus / batch / dates), for ALL trainers
   useEffect(() => {
     let cancelled = false;
+
+    // project, start date and end date are compulsory: never run an open-ended query
+    if (!filters.project || !filters.startDate || !filters.endDate) {
+      setEntries([]);
+      setLoadError('Project, start date and end date are required to build an invoice pack.');
+      setLoadingEntries(false);
+      return undefined;
+    }
+
     const load = async () => {
       setLoadingEntries(true);
       setLoadError(null);
       try {
-        const constraints = [];
-        if (filters.project) constraints.push(where('projectId', '==', filters.project));
+        const start = parseLocalDate(filters.startDate);
+        const end = parseLocalDate(filters.endDate);
+        end.setHours(23, 59, 59, 999);
+
+        const constraints = [
+          where('projectId', '==', filters.project),
+          where('date', '>=', start),
+          where('date', '<=', end),
+        ];
         if (filters.campus) constraints.push(where('campusId', '==', filters.campus));
         if (filters.batch) constraints.push(where('batchId', '==', filters.batch));
-        if (filters.startDate) constraints.push(where('date', '>=', new Date(filters.startDate)));
-        if (filters.endDate) {
-          const end = new Date(filters.endDate);
-          end.setHours(23, 59, 59, 999);
-          constraints.push(where('date', '<=', end));
-        }
+
         const q = query(collection(db, 'entries'), ...constraints, orderBy('date', 'desc'));
         const snap = await getDocs(q);
         if (cancelled) return;
@@ -320,7 +340,7 @@ const InvoicePackModal = ({ trainers, filters, filterLabels, onClose }) => {
           <div className="flex flex-wrap items-center gap-3 border-b border-gray-200 px-5 py-3">
             <label
               className={`rounded-md bg-blue-900 px-3 py-2 text-sm font-medium text-white hover:bg-blue-800 ${
-                busy || loadingEntries ? 'pointer-events-none opacity-50' : 'cursor-pointer'
+                busy || loadingEntries || loadError ? 'pointer-events-none opacity-50' : 'cursor-pointer'
               }`}
             >
               Upload invoice folder
@@ -331,7 +351,7 @@ const InvoicePackModal = ({ trainers, filters, filterLabels, onClose }) => {
                 directory=""
                 multiple
                 onChange={handleFolder}
-                disabled={busy || loadingEntries}
+                disabled={busy || loadingEntries || Boolean(loadError)}
               />
             </label>
             {files.length > 0 && eligible.length > 0 && (

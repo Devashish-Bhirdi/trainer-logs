@@ -1,115 +1,52 @@
-import { useState, useEffect, useCallback } from 'react';
-import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
+import { useState, useEffect } from 'react';
+import { collection, query, where, getDocs } from 'firebase/firestore';
 import { db } from '../services/firebase';
-import { exportToPDF, exportToExcel, exportToWord } from '../services/exportService';
 import InvoicePackModal from './InvoicePackModal';
 
+const EMPTY_FILTERS = {
+  project: '',
+  campus: '',
+  batch: '',
+  trainer: '',
+  startDate: '',
+  endDate: '',
+};
+
+const byName = (a, b) => (a.name || '').toString().localeCompare((b.name || '').toString());
+
+const inputClass =
+  'w-full h-11 px-3 border border-gray-300 rounded-lg text-sm bg-white focus:ring-blue-500 focus:border-blue-500 ' +
+  'disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed';
+
+const Field = ({ id, label, required, children }) => (
+  <div>
+    <label htmlFor={id} className="block text-xs font-semibold text-gray-700 mb-1.5">
+      {label}
+      {required && (
+        <span className="text-red-600" aria-hidden="true"> *</span>
+      )}
+    </label>
+    {children}
+  </div>
+);
+
 const TrainerInvoice = () => {
-  const [entries, setEntries] = useState([]);
   const [projects, setProjects] = useState([]);
   const [campuses, setCampuses] = useState([]);
   const [batches, setBatches] = useState([]);
   const [trainers, setTrainers] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [filters, setFilters] = useState({
-    project: '',
-    campus: '',
-    batch: '',
-    trainer: '',
-    startDate: '',
-    endDate: ''
-  });
+  const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [projectHasCampuses, setProjectHasCampuses] = useState(true);
   const [showPack, setShowPack] = useState(false);
 
-  const fetchEntries = useCallback(async () => {
-    setLoading(true);
-    try {
-      let q = query(collection(db, 'entries'), orderBy('date', 'desc'));
-
-      const constraints = [];
-
-      if (filters.project) {
-        constraints.push(where('projectId', '==', filters.project));
-      }
-
-      if (filters.campus) {
-        constraints.push(where('campusId', '==', filters.campus));
-      }
-
-      if (filters.batch) {
-        constraints.push(where('batchId', '==', filters.batch));
-      }
-
-      if (filters.trainer) {
-        constraints.push(where('trainerId', '==', filters.trainer));
-      }
-
-      // date range filters
-      if (filters.startDate) {
-        constraints.push(where('date', '>=', new Date(filters.startDate)));
-      }
-      if (filters.endDate) {
-        const end = new Date(filters.endDate);
-        end.setHours(23, 59, 59, 999);
-        constraints.push(where('date', '<=', end));
-      }
-
-      if (constraints.length > 0) {
-        q = query(collection(db, 'entries'), ...constraints, orderBy('date', 'desc'));
-      }
-
-      const querySnapshot = await getDocs(q);
-      const entriesData = [];
-      querySnapshot.forEach((doc) => {
-        entriesData.push({ id: doc.id, ...doc.data() });
-      });
-
-      setEntries(entriesData);
-    } catch (error) {
-      console.error('Error fetching entries:', error);
-    }
-    setLoading(false);
-  }, [filters]);
-
-  useEffect(() => {
-    fetchProjects();
-    fetchTrainers();
-  }, []);
-
-  useEffect(() => {
-    fetchEntries();
-  }, [fetchEntries]);
-
-  useEffect(() => {
-    if (filters.project) {
-      fetchCampuses(filters.project);
-      fetchBatchesForProject(filters.project);
-    } else {
-      setCampuses([]);
-      setBatches([]);
-      setFilters(prev => ({ ...prev, campus: '', batch: '' }));
-      setProjectHasCampuses(true);
-      setShowPack(false); // no project -> no invoice pack
-    }
-  }, [filters.project]);
-
-  useEffect(() => {
-    if (filters.campus && projectHasCampuses) {
-      fetchBatchesForCampus(filters.campus);
-    }
-  }, [filters.campus, projectHasCampuses]);
+  // ---------- data for the dropdowns (entries are NOT fetched on this page) ----------
 
   const fetchProjects = async () => {
     try {
-      const querySnapshot = await getDocs(collection(db, 'projects'));
-      const projectsData = [];
-      querySnapshot.forEach((doc) => {
-        projectsData.push({ id: doc.id, ...doc.data() });
-      });
-      // sort projects alphabetically by name
-      projectsData.sort((a, b) => (a.name || '').toString().localeCompare((b.name || '').toString()));
-      setProjects(projectsData);
+      const snap = await getDocs(collection(db, 'projects'));
+      const data = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      data.sort(byName);
+      setProjects(data);
     } catch (error) {
       console.error('Error fetching projects:', error);
     }
@@ -118,309 +55,240 @@ const TrainerInvoice = () => {
   const fetchTrainers = async () => {
     try {
       const q = query(collection(db, 'users'), where('role', '==', 'trainer'));
-      const querySnapshot = await getDocs(q);
-      const trainersData = [];
-      querySnapshot.forEach((doc) => {
-        trainersData.push({ id: doc.id, ...doc.data() });
-      });
-      // sort trainers alphabetically by display name or email
-      trainersData.sort((a, b) => ((a.name || a.email) || '').toString().localeCompare(((b.name || b.email) || '').toString()));
-      setTrainers(trainersData);
+      const snap = await getDocs(q);
+      const data = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      data.sort((a, b) =>
+        ((a.name || a.email) || '').toString().localeCompare(((b.name || b.email) || '').toString())
+      );
+      setTrainers(data);
     } catch (error) {
       console.error('Error fetching trainers:', error);
     }
   };
 
-  const getTrainerDisplay = (trainerId, entry) => {
-    const t = trainers.find(tr => tr.id === trainerId || tr.uid === trainerId);
-    if (t) return t.name || t.email || t.uid || 'N/A';
-    // fallback to entry fields
-    return (entry && (entry.trainerName || entry.trainerEmail)) || 'N/A';
-  };
-
   const fetchCampuses = async (projectId) => {
     try {
       const q = query(collection(db, 'campuses'), where('projectId', '==', projectId));
-      const querySnapshot = await getDocs(q);
-      const campusesData = [];
-      querySnapshot.forEach((doc) => {
-        campusesData.push({ id: doc.id, ...doc.data() });
-      });
-      // sort campuses alphabetically by name
-      campusesData.sort((a, b) => (a.name || '').toString().localeCompare((b.name || '').toString()));
-      setCampuses(campusesData);
-      setProjectHasCampuses(campusesData.length > 0);
+      const snap = await getDocs(q);
+      const data = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      data.sort(byName);
+      setCampuses(data);
+      setProjectHasCampuses(data.length > 0);
     } catch (error) {
       console.error('Error fetching campuses:', error);
       setProjectHasCampuses(true);
     }
   };
 
-  const fetchBatchesForProject = async (projectId) => {
+  const fetchBatches = async (field, value) => {
     try {
-      const q = query(collection(db, 'batches'), where('projectId', '==', projectId));
-      const querySnapshot = await getDocs(q);
-      const batchesData = [];
-      querySnapshot.forEach((doc) => {
-        batchesData.push({ id: doc.id, ...doc.data() });
-      });
-      // sort batches alphabetically by name
-      batchesData.sort((a, b) => (a.name || '').toString().localeCompare((b.name || '').toString()));
-      // If project doesn't have campuses, set batches directly
-      if (batchesData.length > 0) {
-        setBatches(batchesData);
-      } else {
-        setBatches([]);
-      }
-
-      // Reset batch filter when batches change
-      setFilters(prev => ({ ...prev, batch: '' }));
+      const q = query(collection(db, 'batches'), where(field, '==', value));
+      const snap = await getDocs(q);
+      const data = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      data.sort(byName);
+      setBatches(data);
     } catch (error) {
-      console.error('Error fetching batches for project:', error);
+      console.error(`Error fetching batches by ${field}:`, error);
       setBatches([]);
-      setFilters(prev => ({ ...prev, batch: '' }));
     }
+    // batch list changed, so the old selection is no longer valid
+    setFilters((prev) => ({ ...prev, batch: '' }));
   };
 
-  const fetchBatchesForCampus = async (campusId) => {
-    try {
-      const q = query(collection(db, 'batches'), where('campusId', '==', campusId));
-      const querySnapshot = await getDocs(q);
-      const batchesData = [];
-      querySnapshot.forEach((doc) => {
-        batchesData.push({ id: doc.id, ...doc.data() });
-      });
-      // sort batches alphabetically by name
-      batchesData.sort((a, b) => (a.name || '').toString().localeCompare((b.name || '').toString()));
-      setBatches(batchesData);
+  useEffect(() => {
+    fetchProjects();
+    fetchTrainers();
+  }, []);
 
-      // Reset batch filter when batches change
-      setFilters(prev => ({ ...prev, batch: '' }));
-    } catch (error) {
-      console.error('Error fetching batches for campus:', error);
-      setBatches([]);
-      setFilters(prev => ({ ...prev, batch: '' }));
-    }
-  };
-
-  const handleFilterChange = (filterName, value) => {
-    // Reset dependent filters when parent filter changes
-    if (filterName === 'project') {
-      setFilters(prev => ({
-        ...prev,
-        project: value,
-        campus: '',
-        batch: ''
-      }));
-    } else if (filterName === 'campus') {
-      setFilters(prev => ({
-        ...prev,
-        campus: value,
-        batch: ''
-      }));
+  // project changed -> load its campuses and batches (or clear everything)
+  useEffect(() => {
+    if (filters.project) {
+      fetchCampuses(filters.project);
+      fetchBatches('projectId', filters.project);
     } else {
-      setFilters(prev => ({
-        ...prev,
-        [filterName]: value
-      }));
+      setCampuses([]);
+      setBatches([]);
+      setProjectHasCampuses(true);
+      setShowPack(false);
+    }
+  }, [filters.project]);
+
+  // campus changed -> load that campus's batches
+  useEffect(() => {
+    if (filters.campus && projectHasCampuses) {
+      fetchBatches('campusId', filters.campus);
+    }
+  }, [filters.campus, projectHasCampuses]);
+
+  // ---------- handlers ----------
+
+  const handleFilterChange = (name, value) => {
+    // changing a parent filter resets the ones that depend on it
+    if (name === 'project') {
+      setFilters((prev) => ({ ...prev, project: value, campus: '', batch: '' }));
+    } else if (name === 'campus') {
+      setFilters((prev) => ({ ...prev, campus: value, batch: '' }));
+    } else {
+      setFilters((prev) => ({ ...prev, [name]: value }));
     }
   };
 
-  const handleExport = (format) => {
-    if (format === 'pdf') {
-      exportToPDF(entries, filters, 'Training Management System');
-    } else if (format === 'excel') {
-      exportToExcel(entries, filters);
-    } else if (format === 'word') {
-      exportToWord(entries, filters, 'Training Management System');
-    }
+  const handleReset = () => {
+    setFilters(EMPTY_FILTERS);
+    setShowPack(false);
   };
 
-  if (loading) {
-    return (
-      <div className="flex justify-center items-center h-64">
-        <div className="text-gray-600">Loading entries...</div>
-      </div>
-    );
-  }
+  const hasProject = Boolean(filters.project);
+  const hasDates = Boolean(filters.startDate && filters.endDate);
+  const dateOrderOk = !hasDates || filters.endDate >= filters.startDate; // yyyy-mm-dd strings compare correctly
+  // project, start date and end date are all compulsory
+  const canCreate = hasProject && hasDates && dateOrderOk;
+
+  const missing = [];
+  if (!hasProject) missing.push('a project');
+  if (!filters.startDate) missing.push('a start date');
+  if (!filters.endDate) missing.push('an end date');
+  const hintText = !dateOrderOk
+    ? 'The end date must be on or after the start date.'
+    : missing.length > 0
+    ? `Select ${missing.join(', ').replace(/, ([^,]*)$/, ' and $1')} to enable the invoice pack.`
+    : 'Entries are loaded only when you create the pack.';
+  const batchDisabled = !hasProject || (projectHasCampuses && !filters.campus);
+
+  // ---------- render ----------
 
   return (
     <div>
-      <div className="mb-4 md:mb-6 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-xl font-semibold text-gray-800">All Training Entries</h2>
-        {filters.project && (
-          <button
-            onClick={() => setShowPack(true)}
-            className="px-3 py-2 bg-blue-900 text-white rounded-md hover:bg-blue-800 text-sm font-medium"
-          >
-            Invoice Pack
-          </button>
-        )}
+      <div className="mb-6">
+        <h2 className="text-xl font-semibold text-gray-800">Trainer Invoices</h2>
+        <p className="mt-1 text-sm text-gray-600">
+          Pick a project and period, then build the invoice pack for your trainers.
+        </p>
       </div>
 
-      <div className="mb-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 md:gap-4">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Project</label>
-          <select
-            value={filters.project || ''}
-            onChange={(e) => handleFilterChange('project', e.target.value)}
-            className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-          >
-            <option value="">All Projects</option>
-            {projects.map(project => (
-              <option key={project.id} value={project.id}>{project.name}</option>
-            ))}
-          </select>
-        </div>
-
-        {filters.project && projectHasCampuses && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Campus</label>
+      <div className="max-w-4xl bg-white border border-gray-200 rounded-xl p-5 md:p-7">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-5">
+          <Field id="inv-project" label="Project" required>
             <select
-              value={filters.campus || ''}
-              onChange={(e) => handleFilterChange('campus', e.target.value)}
-              className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+              id="inv-project"
+              required
+              aria-required="true"
+              value={filters.project}
+              onChange={(e) => handleFilterChange('project', e.target.value)}
+              className={inputClass}
             >
-              <option value="">All Campuses</option>
-              {campuses.map(campus => (
-                <option key={campus.id} value={campus.id}>{campus.name}</option>
+              <option value="">Select a project</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
               ))}
             </select>
-          </div>
-        )}
+          </Field>
 
-        {filters.project && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Batch</label>
+          {/* hidden only when the chosen project really has no campuses */}
+          {(!hasProject || projectHasCampuses) && (
+            <Field id="inv-campus" label="Campus">
+              <select
+                id="inv-campus"
+                value={filters.campus}
+                onChange={(e) => handleFilterChange('campus', e.target.value)}
+                disabled={!hasProject}
+                className={inputClass}
+              >
+                <option value="">{hasProject ? 'All campuses' : 'Select a project first'}</option>
+                {campuses.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </Field>
+          )}
+
+          <Field id="inv-batch" label="Batch">
             <select
-              value={filters.batch || ''}
+              id="inv-batch"
+              value={filters.batch}
               onChange={(e) => handleFilterChange('batch', e.target.value)}
-              className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-              disabled={projectHasCampuses && !filters.campus}
+              disabled={batchDisabled}
+              className={inputClass}
             >
-              <option value="">All Batches</option>
-              {batches.map(batch => (
-                <option key={batch.id} value={batch.id}>{batch.name}</option>
+              <option value="">{hasProject ? 'All batches' : 'Select a project first'}</option>
+              {batches.map((b) => (
+                <option key={b.id} value={b.id}>{b.name}</option>
               ))}
             </select>
-          </div>
-        )}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
-          <input
-            type="date"
-            value={filters.startDate || ''}
-            onChange={(e) => handleFilterChange('startDate', e.target.value)}
-            className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-          />
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
-          <input
-            type="date"
-            value={filters.endDate || ''}
-            onChange={(e) => handleFilterChange('endDate', e.target.value)}
-            className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-          />
+          </Field>
+
+          <Field id="inv-trainer" label="Trainer">
+            <select
+              id="inv-trainer"
+              value={filters.trainer}
+              onChange={(e) => handleFilterChange('trainer', e.target.value)}
+              className={inputClass}
+            >
+              <option value="">All trainers</option>
+              {trainers.map((t) => (
+                <option key={t.uid || t.id} value={t.uid || t.id || ''}>
+                  {t.name || t.email}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          <Field id="inv-start" label="Start date" required>
+            <input
+              id="inv-start"
+              type="date"
+              required
+              aria-required="true"
+              value={filters.startDate}
+              onChange={(e) => handleFilterChange('startDate', e.target.value)}
+              className={inputClass}
+            />
+          </Field>
+
+          <Field id="inv-end" label="End date" required>
+            <input
+              id="inv-end"
+              type="date"
+              required
+              aria-required="true"
+              aria-invalid={!dateOrderOk}
+              value={filters.endDate}
+              min={filters.startDate || undefined}
+              onChange={(e) => handleFilterChange('endDate', e.target.value)}
+              className={inputClass}
+            />
+          </Field>
         </div>
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Trainer</label>
-          <select
-            value={filters.trainer || ''}
-            onChange={(e) => handleFilterChange('trainer', e.target.value)}
-            className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+        <div className="mt-7 pt-5 border-t border-gray-200 flex flex-wrap items-center gap-3 md:gap-4">
+          <button
+            type="button"
+            onClick={() => canCreate && setShowPack(true)}
+            disabled={!canCreate}
+            className="min-h-11 px-6 bg-blue-900 text-white rounded-lg text-sm font-semibold hover:bg-blue-800
+                       disabled:bg-gray-200 disabled:text-gray-500 disabled:cursor-not-allowed"
           >
-            <option value="">All Trainers</option>
-            {trainers.map(trainer => (
-              <option key={trainer.uid || trainer.id} value={trainer.uid || trainer.id || ''}>
-                {trainer.name || trainer.email}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col justify-end">
-          <label className="block text-sm font-medium text-gray-700 mb-1 invisible">Export</label>
-          <div className="flex space-x-2">
-            <button
-              onClick={() => handleExport('pdf')}
-              className="flex-1 px-3 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 text-sm"
-            >
-              PDF
-            </button>
-            <button
-              onClick={() => handleExport('excel')}
-              className="flex-1 px-3 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm"
-            >
-              Excel
-            </button>
-            <button
-              onClick={() => handleExport('word')}
-              className="flex-1 px-3 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-sm"
-            >
-              Word
-            </button>
-          </div>
+            Create Invoice Pack
+          </button>
+          <button
+            type="button"
+            onClick={handleReset}
+            className="min-h-11 px-3 text-sm font-semibold text-gray-600 hover:text-gray-800"
+          >
+            Reset filters
+          </button>
+          <span className={`text-sm ${dateOrderOk ? 'text-gray-600' : 'text-red-600'}`}>{hintText}</span>
         </div>
       </div>
 
-      <div className="overflow-x-auto">
-        <table className="min-w-full divide-y divide-gray-200">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Project</th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Campus</th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Batch</th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Trainer</th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Topic</th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Hours</th>
-            </tr>
-          </thead>
-          <tbody className="bg-white divide-y divide-gray-200">
-            {entries.length === 0 ? (
-              <tr>
-                <td colSpan={7} className="px-4 py-4 text-center text-gray-500">
-                  No entries found
-                </td>
-              </tr>
-            ) : (
-              entries.map(entry => (
-                <tr key={entry.id} className="hover:bg-gray-50">
-                  <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">
-                    {new Date(entry.date.seconds * 1000).toLocaleDateString()}
-                  </td>
-                  <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">{entry.projectName}</td>
-                  <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">{entry.campusName || 'N/A'}</td>
-                  <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">{entry.batchName}</td>
-                  <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">{getTrainerDisplay(entry.trainerId, entry)}</td>
-                  <td className="px-4 py-4 text-sm text-gray-900">
-                    <div className="font-medium">{entry.topic}</div>
-                    {(entry.subtopic || entry.description) && (
-                      <div className="text-gray-500 text-xs">{entry.subtopic || entry.description}</div>
-                    )}
-                  </td>
-                  <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
-                    <span className="font-medium">{entry.hours}</span> hrs
-                    {entry.studentCount && (
-                      <div className="text-gray-500 text-xs">{entry.studentCount} students</div>
-                    )}
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      {showPack && filters.project && (
+      {showPack && canCreate && (
         <InvoicePackModal
           trainers={trainers}
           filters={{
             project: filters.project,
             campus: filters.campus,
             batch: filters.batch,
+            trainer: filters.trainer,
             startDate: filters.startDate,
             endDate: filters.endDate,
           }}
