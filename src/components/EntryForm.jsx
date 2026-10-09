@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { addDoc, collection, getDocs, query, where, doc, updateDoc } from 'firebase/firestore';
+// import { addDoc, collection, getDocs, query, where, doc, updateDoc } from 'firebase/firestore';
 import { db } from '../services/firebase';
 import { useAuth } from '../hooks/useAuth';
+import { addDoc, collection, getDocs, getDoc, query, where, doc, updateDoc } from 'firebase/firestore';
 
 // Removes repeats (case-insensitive) but keeps the original order
 const dedupe = (list) => {
@@ -19,17 +20,18 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
   const [project, setProject] = useState('');
   const [campus, setCampus] = useState('');
   const [batch, setBatch] = useState('');
-  const [topic, setTopic] = useState('');
-  const [moduleName, setModuleName] = useState('');
-  const [selectedLessons, setSelectedLessons] = useState([]); // ticked from the curriculum list
-  const [extraLessons, setExtraLessons] = useState([]);       // typed under "Others", one chip each
-  const [extraInput, setExtraInput] = useState('');           // text currently in the "Others" box
+  const [topic, setTopic] = useState('');                     // one topic per session
+  const [selections, setSelections] = useState({});           // { moduleName: [ticked lessons] } for the chosen topic
+  const [openModules, setOpenModules] = useState({});         // { moduleName: true } for expanded sections (all collapsed at start)
+  const [extraLessons, setExtraLessons] = useState([]);       // typed under "Extra lessons", one chip each
+  const [extraInput, setExtraInput] = useState('');           // text currently in the "Extra lessons" box
   const [description, setDescription] = useState('');         // free-text summary of the session
   const [startTime, setStartTime] = useState('');
   const [endTime, setEndTime] = useState('');
   const [studentCount, setStudentCount] = useState('');
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
+  const [notice, setNotice] = useState('');                   // heads-up shown when an edited entry can't be shown fully
   const [projects, setProjects] = useState([]);
   const [campuses, setCampuses] = useState([]);
   const [batches, setBatches] = useState([]);
@@ -38,6 +40,38 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
   const [curriculumLoading, setCurriculumLoading] = useState(false);
 
   const { currentUser } = useAuth();
+  // Admins (anyone whose role is set and is not 'trainer') editing an EXISTING entry don't need
+  // curriculum data. Old entries were created before the curriculum feature existed.
+  // A missing role never counts as privileged. NOTE: this is a UI rule only, enforce it in Firestore rules too.
+  const [role,setRole] = useState(null);
+  const [roleLoading,setRoleLoading] = useState(true);
+
+  useEffect(() => {
+  if (!currentUser) {
+    setRole(null);
+    setRoleLoading(false);
+    return;
+  }
+
+  let cancelled = false;
+  const loadRole = async () => {
+    setRoleLoading(true);
+    try {
+      const snap = await getDoc(doc(db, 'users', currentUser.uid));
+      if (!cancelled) setRole(snap.exists() ? snap.data().role || null : null);
+    } catch (error) {
+      console.error('Error loading user role:', error);
+      if (!cancelled) setRole(null);
+    } finally {
+      if (!cancelled) setRoleLoading(false);
+    }
+  };
+  loadRole();
+
+  return () => { cancelled = true; };
+}, [currentUser]);
+
+const isPrivilegedEdit = Boolean(initialEntry) && Boolean(role) && role !== 'trainer';
 
   // Everything below is derived from the fetched curriculum documents - no extra fetching per dropdown.
   // Each document holds { topic: { module: [lessons] } }; merge all that apply to this batch into one map.
@@ -51,8 +85,18 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
     });
   });
   const topics = Object.keys(curriculumMap).sort((a, b) => a.localeCompare(b));
+
+  // Modules of the chosen topic. Only these can ever be shown, so a topic/module mismatch is impossible.
   const modules = topic ? Object.keys(curriculumMap[topic] || {}) : [];
-  const lessonOptions = (topic && curriculumMap[topic] && curriculumMap[topic][moduleName]) || [];
+
+  // What was actually taught: every module of the topic that has at least one valid ticked lesson
+  const coverage = modules
+    .map((m) => {
+      const options = curriculumMap[topic][m] || [];
+      return { topic, module: m, lessons: (selections[m] || []).filter((l) => options.includes(l)) };
+    })
+    .filter((c) => c.lessons.length > 0);
+  const totalTicked = coverage.reduce((n, c) => n + c.lessons.length, 0);
 
   // if editing, populate fields
   useEffect(() => {
@@ -62,14 +106,38 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
       setProject(initialEntry.projectId || '');
       setCampus(initialEntry.campusId || '');
       setBatch(initialEntry.batchId || '');
-      setTopic(initialEntry.topic || '');
-      setModuleName(initialEntry.module || '');
       setExtraLessons(extras);
-      setSelectedLessons((initialEntry.lessons || []).filter((l) => !extras.includes(l)));
       setDescription(initialEntry.description || ''); // older entries have none
       setStartTime(initialEntry.startTime || '');
       setEndTime(initialEntry.endTime || '');
       setStudentCount(initialEntry.studentCount || '');
+      setOpenModules({});
+      setNotice('');
+
+      if (Array.isArray(initialEntry.coverage) && initialEntry.coverage.length > 0) {
+        // new-style entry: one item per module taught
+        const entryTopics = [...new Set(initialEntry.coverage.map((c) => c.topic))];
+        const firstTopic = entryTopics[0] || '';
+        const selected = {};
+        initialEntry.coverage
+          .filter((c) => c.topic === firstTopic)
+          .forEach((c) => { selected[c.module] = c.lessons || []; });
+        setTopic(firstTopic);
+        setSelections(selected);
+        if (entryTopics.length > 1) {
+          setNotice(
+            `This entry covers more than one topic. Only "${firstTopic}" is shown here, and saving will remove the lessons from the other topics.`
+          );
+        }
+      } else {
+        // older entry: single topic/module with a flat lessons list
+        const selected = {};
+        if (initialEntry.module) {
+          selected[initialEntry.module] = (initialEntry.lessons || []).filter((l) => !extras.includes(l));
+        }
+        setTopic(initialEntry.topic || '');
+        setSelections(selected);
+      }
     }
   }, [initialEntry]);
 
@@ -79,13 +147,13 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
 
   useEffect(() => {
     if (project) {
-      fetchCampuses(project);
-      fetchBatchesForProject(project);
+      fetchCampuses(project); // also loads the project's batches when the project has no campuses
     } else {
+      // Don't clear campus/batch here: this branch also runs on the first render, after the
+      // "Edit" effect has filled them in, and would wipe them. The dropdown onChange handlers
+      // already clear campus/batch when the user changes the project.
       setCampuses([]);
       setBatches([]);
-      setCampus('');
-      setBatch('');
       setProjectHasCampuses(true);
     }
   }, [project]);
@@ -96,7 +164,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
     }
   }, [campus, projectHasCampuses]);
 
-  // Load the curriculum for the chosen batch (this is what feeds Topic -> Module -> Lessons).
+  // Load the curriculum for the chosen batch (this is what feeds Topic -> Modules -> Lessons).
   // A curriculum document lists its batches in a `batch` map ({ batchId: batchName }), so fetch the
   // project's documents and keep the ones that include this batch.
   useEffect(() => {
@@ -148,6 +216,8 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
     }
   };
 
+  // NOTE: the fetch functions below don't reset campus/batch. That reset wiped the values
+  // loaded by "Edit". The dropdown onChange handlers already clear them when the user changes a choice.
   const fetchCampuses = async (projectId) => {
     try {
       const q = query(collection(db, 'campuses'), where('projectId', '==', projectId));
@@ -160,9 +230,9 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
       campusesData.sort((a, b) => (a.name || '').toString().localeCompare((b.name || '').toString()));
       setCampuses(campusesData);
       setProjectHasCampuses(campusesData.length > 0);
-
-      // Reset campus when campuses change
-      setCampus('');
+      // Projects without campuses list their batches directly. Projects with campuses load batches
+      // per campus, so the two fetches can't overwrite each other.
+      if (campusesData.length === 0) fetchBatchesForProject(projectId);
     } catch (error) {
       console.error('Error fetching campuses:', error);
       setMessage('Error loading campuses');
@@ -180,15 +250,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
       });
       // sort batches alphabetically by name
       batchesData.sort((a, b) => (a.name || '').toString().localeCompare((b.name || '').toString()));
-      // If project doesn't have campuses, set batches directly
-      if (batchesData.length > 0) {
-        setBatches(batchesData);
-      } else {
-        setBatches([]);
-      }
-
-      // Reset batch when batches change
-      setBatch('');
+      setBatches(batchesData);
     } catch (error) {
       console.error('Error fetching batches for project:', error);
       setBatches([]);
@@ -207,9 +269,6 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
       // sort batches alphabetically by name
       batchesData.sort((a, b) => (a.name || '').toString().localeCompare((b.name || '').toString()));
       setBatches(batchesData);
-
-      // Reset batch when batches change
-      setBatch('');
     } catch (error) {
       console.error('Error fetching batches for campus:', error);
       setMessage('Error loading batches');
@@ -229,20 +288,19 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
   };
 
   // ---------- Validation: every field must be filled before the form can be submitted ----------
-
-  // "Others" is optional on its own, but the session needs at least one lesson from either list.
-  // Text typed in the Others box and not yet added still counts (handleSubmit adds it).
-  const hasLessons = selectedLessons.length > 0 || extraLessons.length > 0 || extraInput.trim() !== '';
+  // Topic, lessons and description are skipped for admin edits (old entries may not have them).
 
   const missingFields = [];
   if (!date) missingFields.push('Date');
   if (!project) missingFields.push('Project');
   if (projectHasCampuses && !campus) missingFields.push('Campus');
   if (!batch) missingFields.push('Batch');
-  if (!topic) missingFields.push('Topic');
-  if (!moduleName) missingFields.push('Module');
-  if (!hasLessons) missingFields.push('Lessons');
-  if (!description.trim()) missingFields.push('Description');
+  if (!isPrivilegedEdit) {
+    if (!topic) missingFields.push('Topic');
+    // The module(s) are worked out from the ticked lessons, so at least one lesson from the list is needed
+    if (topic && coverage.length === 0) missingFields.push('Lessons (tick at least one)');
+    if (!description.trim()) missingFields.push('Description');
+  }
   if (!startTime) missingFields.push('Start time');
   if (!endTime) missingFields.push('End time');
   if (startTime && endTime && Number(calculateHours()) <= 0) missingFields.push('End time after start time');
@@ -255,30 +313,39 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
   // Called whenever project, campus or batch changes - the old choices no longer apply
   const resetTopicSelection = () => {
     setTopic('');
-    setModuleName('');
-    setSelectedLessons([]);
+    setSelections({});
+    setOpenModules({});
+    setNotice('');
   };
 
   const handleTopicChange = (value) => {
+    // switching topic throws away the ticked lessons, so ask first if there are any
+    const hasTicks = Object.values(selections).some((l) => l.length > 0);
+    if (hasTicks && topic && value !== topic) {
+      const ok = window.confirm('Changing the topic will clear the lessons you have ticked. Continue?');
+      if (!ok) return;
+    }
     setTopic(value);
-    setSelectedLessons([]);
-    // a topic with a single module (e.g. "General") doesn't need the extra click
-    const keys = Object.keys(curriculumMap[value] || {});
-    setModuleName(keys.length === 1 ? keys[0] : '');
+    setSelections({});
+    setOpenModules({});
+    setNotice('');
   };
 
-  const handleModuleChange = (value) => {
-    setModuleName(value);
-    setSelectedLessons([]);
+  const toggleModuleOpen = (moduleName) => {
+    setOpenModules((prev) => ({ ...prev, [moduleName]: !prev[moduleName] }));
   };
 
-  const toggleLesson = (lesson) => {
-    setSelectedLessons((prev) =>
-      prev.includes(lesson) ? prev.filter((l) => l !== lesson) : [...prev, lesson]
-    );
+  const toggleLesson = (moduleName, lesson) => {
+    setSelections((prev) => {
+      const current = prev[moduleName] || [];
+      const next = current.includes(lesson)
+        ? current.filter((l) => l !== lesson)
+        : [...current, lesson];
+      return { ...prev, [moduleName]: next };
+    });
   };
 
-  // "Others": each Add (or Enter) turns the text box into one chip, so any number can be added
+  // "Extra lessons": each Add (or Enter) turns the text box into one chip, so any number can be added
   const addExtraLesson = () => {
     const text = extraInput.trim();
     if (!text) return;
@@ -300,10 +367,32 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
       return;
     }
 
-    // Anything typed in the "Others" box but not yet added still counts
+    // Anything typed in the "Extra lessons" box but not yet added still counts
     const pending = extraInput.trim();
     const extras = dedupe(pending ? [...extraLessons, pending] : extraLessons);
-    const lessons = dedupe([...selectedLessons, ...extras]);
+
+    // Admin edit with nothing ticked (old entry, or no curriculum for this batch): keep the entry's
+    // original coverage/module/lessons instead of wiping them. Only done when the topic is unchanged
+    // (or was cleared by changing the batch), so old data is never attached to a different topic.
+    const keepOriginal =
+      isPrivilegedEdit &&
+      coverage.length === 0 &&
+      (!topic || topic === initialEntry.topic);
+
+    const originalExtras = initialEntry?.extraLessons || [];
+    const finalCoverage = coverage.length > 0
+      ? coverage
+      : keepOriginal && Array.isArray(initialEntry.coverage)
+        ? initialEntry.coverage
+        : [];
+    const baseLessons = coverage.length > 0
+      ? coverage.flatMap((c) => c.lessons)
+      : keepOriginal
+        ? (initialEntry.lessons || []).filter((l) => !originalExtras.includes(l))
+        : [];
+    const lessons = dedupe([...baseLessons, ...extras]);
+    const finalTopic = topic || (isPrivilegedEdit ? (initialEntry.topic || '') : '');
+    const finalModule = finalCoverage[0]?.module || (keepOriginal ? (initialEntry.module || '') : '');
 
     setLoading(true);
 
@@ -320,17 +409,19 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
         campusName: projectHasCampuses ? (selectedCampusData?.name || '') : '',
         batchId: batch,
         batchName: selectedBatchData?.name || '',
-        topic,
-        module: moduleName,
-        lessons,            // curriculum lessons + "Others", combined
-        extraLessons: extras, // just the "Others" ones, so they can be told apart later
+        coverage: finalCoverage,                    // [{ topic, module, lessons }] - one item per module taught
+        moduleKeys: finalCoverage.map((c) => `${c.topic}||${c.module}`), // lets you query with array-contains
+        topic: finalTopic,                          // the session's topic
+        module: finalModule,                        // first module, kept so existing screens don't break
+        lessons,            // lessons from every module + extra lessons, combined
+        extraLessons: extras, // just the extra ones, so they can be told apart later
         description: description.trim(), // the whole text as one string
         startTime,
         endTime,
-        hours,
+        hours,              // the session's hours, stored once (not split per module)
         studentCount: parseInt(studentCount, 10),
-        trainerId: currentUser.uid,
-        trainerName: currentUser.displayName || currentUser.email,
+        trainerId: initialEntry?.trainerId || currentUser.uid,
+        trainerName: initialEntry?.trainerName || currentUser.displayName || currentUser.email,
       };
 
       if (initialEntry && initialEntry.id) {
@@ -347,9 +438,7 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
       setProject('');
       setCampus('');
       setBatch('');
-      setTopic('');
-      setModuleName('');
-      setSelectedLessons([]);
+      resetTopicSelection();
       setExtraLessons([]);
       setExtraInput('');
       setDescription('');
@@ -367,7 +456,9 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
 
   return (
     <div >
-      <h2 className="text-xl font-semibold text-gray-800 mb-4 md:mb-6">Add Work Entry</h2>
+      <h2 className="text-xl font-semibold text-gray-800 mb-4 md:mb-6">
+        {initialEntry ? 'Edit Work Entry' : 'Add Work Entry'}
+      </h2>
 
       {message && (
         <div className={`mb-4 p-3 rounded-md text-sm md:text-base ${
@@ -376,6 +467,19 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
             : 'bg-green-100 text-green-700'
         }`}>
           {message}
+        </div>
+      )}
+
+      {notice && (
+        <div className="mb-4 p-3 rounded-md text-sm text-amber-700 bg-amber-50 border border-amber-200">
+          {notice}
+        </div>
+      )}
+
+      {isPrivilegedEdit && (
+        <div className="mb-4 p-3 rounded-md text-sm text-blue-700 bg-blue-50 border border-blue-200">
+          Editing as admin: topic, lessons and description are optional. If you don't change the topic
+          or tick any lessons, the entry's existing topic and lessons are kept as they are.
         </div>
       )}
 
@@ -482,10 +586,13 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
 
         {batch && !curriculumLoading && curriculumDocs.length === 0 && (
           <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-3">
-            No curriculum has been added for this batch yet. Add it from the Mapping page first.
+            {isPrivilegedEdit
+              ? 'No curriculum has been added for this batch. You can still save this entry as admin.'
+              : 'No curriculum has been added for this batch yet. Add it from the Mapping page first.'}
           </p>
         )}
 
+        {/* Topic - chosen once for the whole session */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Topic</label>
@@ -493,67 +600,118 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
               value={topic}
               onChange={(e) => handleTopicChange(e.target.value)}
               className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100"
-              required
+              required={!isPrivilegedEdit}
               disabled={!batch || topics.length === 0}
             >
               <option value="">{!batch ? 'Select Batch First' : 'Select Topic'}</option>
+              {/* Admin editing: show the entry's current topic even if the curriculum doesn't list it */}
+              {isPrivilegedEdit && topic && !topics.includes(topic) && (
+                <option value={topic}>{topic} (not in current curriculum)</option>
+              )}
               {topics.map(t => (
                 <option key={t} value={t}>{t}</option>
               ))}
             </select>
           </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Module</label>
-            <select
-              value={moduleName}
-              onChange={(e) => handleModuleChange(e.target.value)}
-              className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100"
-              required
-              disabled={!topic}
-            >
-              <option value="">{!topic ? 'Select Topic First' : 'Select Module'}</option>
-              {modules.map(m => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </select>
-          </div>
+          <div></div> {/* Empty div for layout consistency */}
         </div>
 
-        {/* Lessons - multi-select, options come from the chosen module */}
+        {/* Lessons - every module of the topic is a collapsible section; tick lessons in as many as were taught */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
             Lessons Covered
-            {selectedLessons.length > 0 && (
-              <span className="ml-2 font-normal text-gray-500">({selectedLessons.length} selected)</span>
+            {totalTicked > 0 && (
+              <span className="ml-2 font-normal text-gray-500">({totalTicked} selected)</span>
             )}
           </label>
 
-          {!moduleName ? (
-            <p className="text-sm text-gray-500">Select a module to see its lessons.</p>
+          {!topic ? (
+            <p className="text-sm text-gray-500">Select a topic to see its modules and lessons.</p>
+          ) : modules.length === 0 ? (
+            <p className="text-sm text-gray-500">
+              This topic isn't in the curriculum for this batch.
+              {isPrivilegedEdit && " The entry's existing lessons will be kept."}
+            </p>
           ) : (
-            <div className="max-h-56 overflow-y-auto border border-gray-300 rounded-md divide-y divide-gray-100">
-              {lessonOptions.map(lesson => (
-                <label
-                  key={lesson}
-                  className="flex items-start gap-2 px-3 py-2 text-sm text-gray-800 hover:bg-gray-50 cursor-pointer"
-                >
-                  <input
-                    type="checkbox"
-                    checked={selectedLessons.includes(lesson)}
-                    onChange={() => toggleLesson(lesson)}
-                    className="mt-0.5"
-                  />
-                  <span>{lesson}</span>
-                </label>
-              ))}
-            </div>
+            <>
+              <div className="border border-gray-300 rounded-md divide-y divide-gray-200 overflow-hidden">
+                {modules.map((m) => {
+                  const options = curriculumMap[topic][m] || [];
+                  const ticked = (selections[m] || []).filter((l) => options.includes(l));
+                  const isOpen = !!openModules[m];
+
+                  return (
+                    <div key={m}>
+                      <button
+                        type="button"
+                        onClick={() => toggleModuleOpen(m)}
+                        aria-expanded={isOpen}
+                        className="w-full flex items-center justify-between gap-3 px-3 py-2 text-left bg-gray-50 hover:bg-gray-100 transition-colors"
+                      >
+                        <span className="flex items-center gap-2 text-sm font-medium text-gray-800">
+                          <svg
+                            className={`w-4 h-4 text-gray-500 transition-transform ${isOpen ? 'rotate-90' : ''}`}
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                          >
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                          </svg>
+                          {m}
+                        </span>
+                        <span className={`text-sm whitespace-nowrap ${ticked.length > 0 ? 'text-blue-700 font-medium' : 'text-gray-500'}`}>
+                          {ticked.length > 0 ? `${ticked.length} of ${options.length} selected` : 'None selected'}
+                        </span>
+                      </button>
+
+                      {isOpen && (
+                        <div className="max-h-56 overflow-y-auto border-t border-gray-200 divide-y divide-gray-100">
+                          {options.map((lesson) => (
+                            <label
+                              key={lesson}
+                              className="flex items-start gap-2 px-3 py-2 text-sm text-gray-800 hover:bg-gray-50 cursor-pointer"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={ticked.includes(lesson)}
+                                onChange={() => toggleLesson(m, lesson)}
+                                className="mt-0.5"
+                              />
+                              <span>{lesson}</span>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {coverage.length > 0 && (
+                <p className="mt-2 text-sm text-gray-600">
+                  Covered: {coverage.map((c) => `${c.module} (${c.lessons.length})`).join(', ')}
+                </p>
+              )}
+            </>
           )}
         </div>
 
-        {/* Others - anything taught that isn't in the list above */}
+        {/* Description - free text about the session, saved as one string */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Others</label>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+          <textarea
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            rows={3}
+            required={!isPrivilegedEdit}
+            className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+            placeholder="Briefly describe what was covered in this session"
+          />
+        </div>
+
+        {/* Extra lessons - anything taught that isn't in the lists above */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Extra Lessons</label>
           <div className="flex gap-2">
             <input
               type="text"
@@ -566,12 +724,13 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
                 }
               }}
               className="flex-1 p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-              placeholder="Taught something not listed? Type it and press Enter"
+              placeholder="Taught something not listed? Type it and press Enter or the Add button"
             />
             <button
               type="button"
               onClick={addExtraLesson}
-              className="px-4 py-2 bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300 text-sm"
+              disabled={!extraInput.trim()}
+              className="px-4 py-2 rounded-md text-sm transition-colors bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed disabled:hover:bg-gray-200"
             >
               Add
             </button>
@@ -597,19 +756,6 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
               ))}
             </div>
           )}
-        </div>
-
-        {/* Description - free text about the session, saved as one string */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
-          <textarea
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            rows={3}
-            required
-            className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-            placeholder="Briefly describe what was covered in this session"
-          />
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6">

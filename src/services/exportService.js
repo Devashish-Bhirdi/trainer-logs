@@ -16,7 +16,8 @@ import {
   ShadingType,
   TableLayoutType,
   VerticalAlign,
-  HeadingLevel
+  HeadingLevel,
+  PageBreak
 } from 'docx';
 import { collection, query, where, getDocs } from 'firebase/firestore';
 import { db } from './firebase';
@@ -559,87 +560,164 @@ const resolveTrainerName = (entry, trainersMap) => {
 };
 
 // Group entries by batch and aggregate hours by topic
-const buildClosureReportData = (entries, trainersMap) => {
-  const batchMap = new Map();
-  const topicSet = new Set();
+/* ----------------------------- FORMATS ---------------------------------- */
 
-  entries.forEach((entry) => {
-    const key = entry.batchId || entry.batchName || 'unknown';
-    if (!batchMap.has(key)) {
-      batchMap.set(key, {
-        id: key,
-        name: entry.batchName || 'N/A',
-        rows: [],
-        trainers: new Set(),
-        hoursByTopic: {},
-        total: 0
-      });
-    }
-    const batch = batchMap.get(key);
-
-    const topic = (entry.topic || '').trim() || 'Other';
-    const hours = Number(entry.hours) || 0;
-    const trainer = resolveTrainerName(entry, trainersMap);
-    const hasStudents = entry.studentCount != null && entry.studentCount !== '';
-
-    topicSet.add(topic);
-    batch.trainers.add(trainer);
-    batch.hoursByTopic[topic] = (batch.hoursByTopic[topic] || 0) + hours;
-    batch.total += hours;
-    batch.rows.push({
-      date: entryDateToJS(entry.date),
-      trainer,
-      domain: topic,
-      topics: entry.subtopic || entry.description || '-',
-      students: hasStudents ? String(entry.studentCount) : '-'
-    });
-  });
-
-  const batches = Array.from(batchMap.values())
-    .sort((a, b) => a.name.toString().localeCompare(b.name.toString()));
-
-  batches.forEach((b) => {
-    // oldest first
-    b.rows.sort((x, y) => (x.date ? x.date.getTime() : 0) - (y.date ? y.date.getTime() : 0));
-    b.trainers = Array.from(b.trainers).sort((x, y) => x.localeCompare(y));
-  });
-
-  const topics = Array.from(topicSet).sort((a, b) => a.localeCompare(b));
-
-  const summaryHead = ['POA', ...batches.map((b) => b.name)];
-  const summaryBody = topics.map((t) => [t, ...batches.map((b) => fmtHours(b.hoursByTopic[t] || 0))]);
-  summaryBody.push(['Total', ...batches.map((b) => fmtHours(b.total))]);
-
-  return { batches, topics, summaryHead, summaryBody };
+export const CLOSURE_FORMATS = {
+  BATCH: 'batch',     // one table per batch
+  TRAINER: 'trainer', // one table per trainer
+  DATE: 'date'        // one table per date
 };
 
-const buildPoaLine = (meta) =>
-  `POA (${formatOrdinalDate(parseInputDate(meta.startDate))} - ${formatOrdinalDate(parseInputDate(meta.endDate))})`;
+const isValidDate = (d) => d instanceof Date && !isNaN(d.getTime());
+const timeOf = (d) => (isValidDate(d) ? d.getTime() : Infinity);
+// Oldest first, missing/invalid dates last
+const cmpTime = (a, b) => {
+  const at = timeOf(a);
+  const bt = timeOf(b);
+  return at === bt ? 0 : at < bt ? -1 : 1;
+};
+const cmpText = (a, b) => String(a).localeCompare(String(b));
+const dayKey = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const uniqSorted = (arr) => Array.from(new Set(arr)).sort(cmpText);
+
+// PDF widths in mm (sum 182) / Word widths in twips (sum 10466)
+const FORMAT_CONFIG = {
+  batch: {
+    head: ['Date', 'Trainer', 'Domain', 'Topics Covered', 'Students'],
+    pdfColW: [28, 32, 28, 74, 20],
+    wordColW: [1700, 2000, 1700, 4166, 900],
+    groupKey: (r) => r.batchKey,
+    groupName: (r) => r.batchName,
+    title: (g) => `Batch - ${g.name}`,
+    subtitle: (g) => ({ label: 'Trainers:', value: uniqSorted(g.records.map((r) => r.trainer)).join(', ') || '-' }),
+    rowSort: (a, b) => cmpTime(a.date, b.date),
+    row: (r) => [formatTableDate(r.date), r.trainer, r.domain, r.topics, r.students]
+  },
+  trainer: {
+    head: ['Date', 'Batch', 'Domain', 'Topics Covered', 'Students'],
+    pdfColW: [28, 32, 28, 74, 20],
+    wordColW: [1700, 2000, 1700, 4166, 900],
+    groupKey: (r) => r.trainer,
+    groupName: (r) => r.trainer,
+    title: (g) => `Trainer - ${g.name}`,
+    subtitle: (g) => ({ label: 'Batches:', value: uniqSorted(g.records.map((r) => r.batchName)).join(', ') || '-' }),
+    rowSort: (a, b) => cmpTime(a.date, b.date) || cmpText(a.batchName, b.batchName),
+    row: (r) => [formatTableDate(r.date), r.batchName, r.domain, r.topics, r.students]
+  },
+  date: {
+    head: ['Batch', 'Trainer', 'Domain', 'Topics Covered', 'Students'],
+    pdfColW: [32, 32, 28, 70, 20],
+    wordColW: [2000, 2000, 1700, 3866, 900],
+    groupKey: (r) => (isValidDate(r.date) ? dayKey(r.date) : 'no-date'),
+    groupName: (r) => (isValidDate(r.date) ? formatTableDate(r.date) : 'No Date'),
+    title: (g) => g.name,
+    subtitle: null,
+    rowSort: (a, b) => cmpText(a.batchName, b.batchName) || cmpText(a.trainer, b.trainer),
+    row: (r) => [r.batchName, r.trainer, r.domain, r.topics, r.students]
+  }
+};
+
+/* ------------------------------ DATA ------------------------------------ */
+
+// Normalise raw entries once; every format is built from these records.
+const buildRecords = (entries, trainersMap) =>
+  entries.map((entry) => {
+    const hasStudents = entry.studentCount != null && entry.studentCount !== '';
+    return {
+      date: entryDateToJS(entry.date),
+      batchKey: entry.batchId || entry.batchName || 'unknown',
+      batchName: entry.batchName || 'N/A',
+      trainer: resolveTrainerName(entry, trainersMap),
+      domain: (entry.topic || '').trim() || 'Other',
+      topics: entry.subtopic || entry.description || '-',
+      students: hasStudents ? String(entry.studentCount) : '-'
+      // POA (disabled)
+      // hours: Number(entry.hours) || 0,
+    };
+  });
+
+// Groups records and orders the groups by their earliest date (oldest first).
+// Groups with no valid date go last; ties fall back to name.
+const groupRecords = (records, keyFn, nameFn) => {
+  const map = new Map();
+  records.forEach((r) => {
+    const key = keyFn(r);
+    if (!map.has(key)) map.set(key, { id: key, name: nameFn(r), records: [], firstDate: null });
+    const g = map.get(key);
+    g.records.push(r);
+    if (isValidDate(r.date) && (!g.firstDate || r.date.getTime() < g.firstDate.getTime())) {
+      g.firstDate = r.date;
+    }
+  });
+  return Array.from(map.values()).sort((a, b) => cmpTime(a.firstDate, b.firstDate) || cmpText(a.name, b.name));
+};
+
+const buildClosureReportData = (entries, trainersMap, format = CLOSURE_FORMATS.BATCH) => {
+  const cfg = FORMAT_CONFIG[format] || FORMAT_CONFIG.batch;
+  const records = buildRecords(entries, trainersMap);
+
+  const groups = groupRecords(records, cfg.groupKey, cfg.groupName).map((g) => {
+    g.records.sort(cfg.rowSort);
+    return {
+      id: g.id,
+      name: g.name, // key used by meta.batchBreaks
+      title: cfg.title(g),
+      subtitle: cfg.subtitle ? cfg.subtitle(g) : null, // { label, value } or null
+      rows: g.records.map(cfg.row)
+    };
+  });
+
+  return { groups, head: cfg.head, pdfColW: cfg.pdfColW, wordColW: cfg.wordColW };
+};
+
+// POA (disabled): summary table data (hours per topic per batch).
+// To re-enable: uncomment `hours` in buildRecords, build batch groups with
+// groupRecords(records, FORMAT_CONFIG.batch.groupKey, FORMAT_CONFIG.batch.groupName)
+// and spread the result of this function into the object returned above.
+// const buildPoaSummary = (records, batchGroups) => {
+//   const topics = uniqSorted(records.map((r) => r.domain));
+//   const hours = (g, t) =>
+//     records.filter((r) => r.batchKey === g.id && r.domain === t).reduce((s, r) => s + r.hours, 0);
+//   const total = (g) => records.filter((r) => r.batchKey === g.id).reduce((s, r) => s + r.hours, 0);
+//   const summaryHead = ['POA', ...batchGroups.map((g) => g.name)];
+//   const summaryBody = topics.map((t) => [t, ...batchGroups.map((g) => fmtHours(hours(g, t)))]);
+//   summaryBody.push(['Total', ...batchGroups.map((g) => fmtHours(total(g)))]);
+//   return { topics, summaryHead, summaryBody };
+// };
+
+// POA (disabled)
+// const buildPoaLine = (meta) =>
+//   `POA (${formatOrdinalDate(parseInputDate(meta.startDate))} - ${formatOrdinalDate(parseInputDate(meta.endDate))})`;
 
 const buildFileBase = (meta) => {
   const parts = ['Closure_Report', safeFilePart(meta.projectName)];
   if (meta.campusName) parts.push(safeFilePart(meta.campusName));
+  if (meta.format === CLOSURE_FORMATS.TRAINER) parts.push('By_Trainer');
+  if (meta.format === CLOSURE_FORMATS.DATE) parts.push('By_Date');
   return parts.filter(Boolean).join('_');
 };
 
 /* ------------------------------- PDF ------------------------------------ */
-
-const pdfSummaryFontSize = (n) => {
-  if (n <= 4) return 10;
-  if (n <= 6) return 9;
-  if (n <= 8) return 8;
-  if (n <= 10) return 7;
-  return 6;
-};
+// POA (disabled)
+// const pdfSummaryFontSize = (n) => {
+//   if (n <= 4) return 10;
+//   if (n <= 6) return 9;
+//   if (n <= 8) return 8;
+//   if (n <= 10) return 7;
+//   return 6;
+// };
 
 const renderClosurePDF = (report, meta) => {
   const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
   const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
   const margin = 14;
   const usable = pageW - margin * 2;
   const PT_TO_MM = 0.3528;
+  const MIN_SPACE_FOR_BATCH = 60; // mm needed for title + subtitle + header + 1 row
 
-  let y = 45;
+  let y = 25; // was 45 when page 1 was a cover page for the POA table
   const centered = (text, size, style, color, gap) => {
     doc.setFont('helvetica', style);
     doc.setFontSize(size);
@@ -653,87 +731,106 @@ const renderClosurePDF = (report, meta) => {
   centered(meta.companyName || 'Company Name', 24, 'bold', [40, 40, 40], 4);
   centered('Closure Report', 20, 'bold', BLUE_RGB, 6);
   centered(meta.projectName || '', 14, 'normal', [60, 60, 60], 4);
-  centered(buildPoaLine(meta), 12, 'normal', [90, 90, 90], 10);
+  // POA (disabled)
+  // centered(buildPoaLine(meta), 12, 'normal', [90, 90, 90], 10);
 
-  // ---- Page 1: summary table ----
-  const n = report.batches.length;
-  const fs = pdfSummaryFontSize(n);
-  const firstColW = Math.min(55, usable * 0.3);
-  const otherColW = (usable - firstColW) / Math.max(n, 1);
-  const summaryColumnStyles = { 0: { cellWidth: firstColW, fontStyle: 'bold' } };
-  for (let i = 1; i <= n; i++) summaryColumnStyles[i] = { cellWidth: otherColW };
-  const totalRowIndex = report.summaryBody.length - 1;
+  // ---- Page 1: POA summary table (disabled) ----
+  // const n = report.batches.length;
+  // const fs = pdfSummaryFontSize(n);
+  // const firstColW = Math.min(55, usable * 0.3);
+  // const otherColW = (usable - firstColW) / Math.max(n, 1);
+  // const summaryColumnStyles = { 0: { cellWidth: firstColW, fontStyle: 'bold' } };
+  // for (let i = 1; i <= n; i++) summaryColumnStyles[i] = { cellWidth: otherColW };
+  // const totalRowIndex = report.summaryBody.length - 1;
+  //
+  // autoTable(doc, {
+  //   startY: y,
+  //   head: [report.summaryHead],
+  //   body: report.summaryBody,
+  //   theme: 'grid',
+  //   tableWidth: usable,
+  //   margin: { top: 20, left: margin, right: margin },
+  //   styles: {
+  //     fontSize: fs,
+  //     halign: 'center',
+  //     valign: 'middle',
+  //     overflow: 'linebreak',
+  //     lineColor: [200, 200, 200],
+  //     lineWidth: 0.1,
+  //     cellPadding: 2.5
+  //   },
+  //   headStyles: { fillColor: BLUE_RGB, textColor: 255, fontStyle: 'bold' },
+  //   alternateRowStyles: { fillColor: GREY_RGB },
+  //   columnStyles: summaryColumnStyles,
+  //   didParseCell: (data) => {
+  //     if (data.section === 'body' && data.row.index === totalRowIndex) {
+  //       data.cell.styles.fillColor = LIGHT_BLUE_RGB;
+  //       data.cell.styles.fontStyle = 'bold';
+  //     }
+  //   }
+  // });
 
-  autoTable(doc, {
-    startY: y,
-    head: [report.summaryHead],
-    body: report.summaryBody,
-    theme: 'grid',
-    tableWidth: usable,
-    margin: { top: 20, left: margin, right: margin },
-    styles: {
-      fontSize: fs,
-      halign: 'center',
-      valign: 'middle',
-      overflow: 'linebreak',
-      lineColor: [200, 200, 200],
-      lineWidth: 0.1,
-      cellPadding: 2.5
-    },
-    headStyles: { fillColor: BLUE_RGB, textColor: 255, fontStyle: 'bold' },
-    alternateRowStyles: { fillColor: GREY_RGB },
-    columnStyles: summaryColumnStyles,
-    didParseCell: (data) => {
-      if (data.section === 'body' && data.row.index === totalRowIndex) {
-        data.cell.styles.fillColor = LIGHT_BLUE_RGB;
-        data.cell.styles.fontStyle = 'bold';
-      }
+  const columnStyles = Object.fromEntries(report.pdfColW.map((w, i) => [i, { cellWidth: w }]));
+
+  // ---- Group tables (batch / trainer / date) ----
+  report.groups.forEach((group, idx) => {
+    // The first group now sits on page 1 under the header.
+    // Others follow meta.batchBreaks[group.name]; default is a new page.
+    let startNewPage = idx === 0 ? false : (meta.batchBreaks?.[group.name] ?? true);
+    let by;
+
+    if (!startNewPage) {
+      by = idx === 0 ? y + 4 : doc.lastAutoTable.finalY + 12;
+      // Not enough room left on this page -> fall back to a new page
+      if (by > pageH - MIN_SPACE_FOR_BATCH) startNewPage = true;
     }
-  });
+    if (startNewPage) {
+      doc.addPage();
+      by = 22;
+    }
 
-  // ---- Batch pages ----
-  report.batches.forEach((batch) => {
-    doc.addPage();
-    let by = 22;
-
-    // Subtitle: Batch - name (blue)
+    // Title (blue)
     doc.setFontSize(16);
     doc.setTextColor(...BLUE_RGB);
     doc.setFont('helvetica', 'bold');
 
-    const subLines = doc.splitTextToSize(`Batch - ${batch.name}`, usable);
-    doc.text(subLines, pageW / 2, by, { align: 'center' });
-    by += subLines.length * 16 * PT_TO_MM * 1.25 + 3;
+    const titleLines = doc.splitTextToSize(group.title, usable);
+    doc.text(titleLines, pageW / 2, by, { align: 'center' });
+    by += titleLines.length * 16 * PT_TO_MM * 1.25 + 3;
 
-    // H2: Trainers: (bold) + names
-    doc.setFontSize(12);
-    doc.setTextColor(30, 30, 30);
-    const label = 'Trainers:';
+    // Subtitle: (bold) label + value, e.g. "Trainers: A, B" (skipped for date tables)
+    if (group.subtitle) {
+      doc.setFontSize(12);
+      doc.setTextColor(30, 30, 30);
+      const label = group.subtitle.label;
 
-    doc.setFont('helvetica', 'bold');
-    const labelW = doc.getTextWidth(label) +2;
-    
-    doc.setFont('helvetica', 'normal');
-    const trainerLines = doc.splitTextToSize(batch.trainers.join(', ') || '-', usable - labelW);
+      doc.setFont('helvetica', 'bold');
+      const labelW = doc.getTextWidth(label) + 2;
 
-    const firstLineW = doc.getTextWidth(trainerLines[0]);
-    const startX = (pageW - (labelW+firstLineW)) / 2;
-    
-    doc.setFont('helvetica','bold');
-    doc.text(label,startX,by);
+      doc.setFont('helvetica', 'normal');
+      const subLines = doc.splitTextToSize(group.subtitle.value, usable - labelW);
 
-    doc.setFont('helvetica','normal');
-    doc.text(trainerLines,startX + labelW,by);
+      const firstLineW = doc.getTextWidth(subLines[0]);
+      const startX = (pageW - (labelW + firstLineW)) / 2;
 
-    for(let i = 1;i < trainerLines.length;i++){
-      doc.text(trainerLines[i],pageW / 2, by + i * 12 * PT_TO_MM*1.3, {align:'center'});
+      doc.setFont('helvetica', 'bold');
+      doc.text(label, startX, by);
+
+      doc.setFont('helvetica', 'normal');
+      doc.text(subLines[0], startX + labelW, by);
+
+      for (let i = 1; i < subLines.length; i++) {
+        doc.text(subLines[i], pageW / 2, by + i * 12 * PT_TO_MM * 1.3, { align: 'center' });
+      }
+      by += subLines.length * 12 * PT_TO_MM * 1.3 + 4;
+    } else {
+      by += 2;
     }
-    by += trainerLines.length * 12 * PT_TO_MM * 1.3 + 4;
 
     autoTable(doc, {
       startY: by,
-      head: [['Date', 'Trainer', 'Domain', 'Topics Covered', 'Students']],
-      body: batch.rows.map((r) => [formatTableDate(r.date), r.trainer, r.domain, r.topics, r.students]),
+      head: [report.head],
+      body: group.rows,
       theme: 'grid',
       tableWidth: usable,
       margin: { top: 20, left: margin, right: margin },
@@ -748,13 +845,7 @@ const renderClosurePDF = (report, meta) => {
       },
       headStyles: { fillColor: BLUE_RGB, textColor: 255, fontStyle: 'bold' },
       alternateRowStyles: { fillColor: GREY_RGB },
-      columnStyles: {
-        0: { cellWidth: 28 },
-        1: { cellWidth: 32 },
-        2: { cellWidth: 28 },
-        3: { cellWidth: 74 },
-        4: { cellWidth: 20 }
-      },
+      columnStyles,
       showHead: 'everyPage'
     });
   });
@@ -769,14 +860,15 @@ const WORD_PAGE_H = 16838;
 const WORD_MARGIN = 720;
 const WORD_CONTENT_W = WORD_PAGE_W - WORD_MARGIN * 2; // 10466
 
-const wordSummaryFontSize = (n) => {
-  // half-points
-  if (n <= 4) return 20;
-  if (n <= 6) return 18;
-  if (n <= 8) return 16;
-  if (n <= 10) return 14;
-  return 12;
-};
+// POA (disabled)
+// const wordSummaryFontSize = (n) => {
+//   // half-points
+//   if (n <= 4) return 20;
+//   if (n <= 6) return 18;
+//   if (n <= 8) return 16;
+//   if (n <= 10) return 14;
+//   return 12;
+// };
 
 const thinBorder = { style: BorderStyle.SINGLE, size: 4, color: 'BFBFBF' };
 const tableBorders = {
@@ -811,92 +903,106 @@ const centeredPara = (text, { size, bold = false, color = '000000', before = 0, 
 
 const renderClosureWord = async (report, meta) => {
   const children = [];
+  const spacer = () => new Paragraph({ spacing: { before: 0, after: 0 }, children: [] });
 
   // ---- Page 1: headers ----
-  children.push(centeredPara(meta.companyName || 'Company Name', { size: 48, bold: true, color: '282828', before: 1800, after: 160 }));
+  // before was 1800 when page 1 was a cover page for the POA table
+  children.push(centeredPara(meta.companyName || 'Company Name', { size: 48, bold: true, color: '282828', before: 400, after: 160 }));
   children.push(centeredPara('Closure Report', { size: 40, bold: true, color: BLUE_HEX, after: 200 }));
   children.push(centeredPara(meta.projectName || '', { size: 28, color: '3C3C3C', after: 120 }));
-  children.push(centeredPara(buildPoaLine(meta), { size: 24, color: '5A5A5A', after: 400 }));
+  // POA (disabled)
+  // children.push(centeredPara(buildPoaLine(meta), { size: 24, color: '5A5A5A', after: 400 }));
 
-  // ---- Page 1: summary table ----
-  const n = Math.max(report.batches.length, 1);
-  const fs = wordSummaryFontSize(report.batches.length);
-  const firstW = Math.max(1800, Math.min(3000, Math.floor(WORD_CONTENT_W * 0.28)));
-  const otherW = Math.floor((WORD_CONTENT_W - firstW) / n);
-  const tableW = firstW + otherW * n;
-  const colWidths = [firstW, ...Array(n).fill(otherW)];
-  const totalRowIndex = report.summaryBody.length - 1;
+  // ---- Page 1: POA summary table (disabled) ----
+  // const n = Math.max(report.batches.length, 1);
+  // const fs = wordSummaryFontSize(report.batches.length);
+  // const firstW = Math.max(1800, Math.min(3000, Math.floor(WORD_CONTENT_W * 0.28)));
+  // const otherW = Math.floor((WORD_CONTENT_W - firstW) / n);
+  // const tableW = firstW + otherW * n;
+  // const colWidths = [firstW, ...Array(n).fill(otherW)];
+  // const totalRowIndex = report.summaryBody.length - 1;
+  //
+  // const summaryRows = [
+  //   new TableRow({
+  //     tableHeader: true,
+  //     cantSplit: true,
+  //     children: report.summaryHead.map((h, i) =>
+  //       wCell(h, { width: colWidths[i], bold: true, color: 'FFFFFF', fill: BLUE_HEX, size: fs })
+  //     )
+  //   }),
+  //   ...report.summaryBody.map((row, rIdx) => {
+  //     const isTotal = rIdx === totalRowIndex;
+  //     const fill = isTotal ? LIGHT_BLUE_HEX : rIdx % 2 === 1 ? GREY_HEX : 'FFFFFF';
+  //     return new TableRow({
+  //       cantSplit: true,
+  //       children: row.map((val, i) =>
+  //         wCell(val, { width: colWidths[i], bold: isTotal || i === 0, fill, size: fs })
+  //       )
+  //     });
+  //   })
+  // ];
+  //
+  // children.push(
+  //   new Table({
+  //     width: { size: tableW, type: WidthType.DXA },
+  //     columnWidths: colWidths,
+  //     layout: TableLayoutType.FIXED,
+  //     borders: tableBorders,
+  //     alignment: AlignmentType.CENTER,
+  //     rows: summaryRows
+  //   })
+  // );
+  // children.push(spacer()); // gap after the summary table
 
-  const summaryRows = [
-    new TableRow({
-      tableHeader: true,
-      cantSplit: true,
-      children: report.summaryHead.map((h, i) =>
-        wCell(h, { width: colWidths[i], bold: true, color: 'FFFFFF', fill: BLUE_HEX, size: fs })
-      )
-    }),
-    ...report.summaryBody.map((row, rIdx) => {
-      const isTotal = rIdx === totalRowIndex;
-      const fill = isTotal ? LIGHT_BLUE_HEX : rIdx % 2 === 1 ? GREY_HEX : 'FFFFFF';
-      return new TableRow({
-        cantSplit: true,
-        children: row.map((val, i) =>
-          wCell(val, { width: colWidths[i], bold: isTotal || i === 0, fill, size: fs })
-        )
-      });
-    })
-  ];
+  // ---- Group sections (batch / trainer / date) ----
+  const colW = report.wordColW;
 
-  children.push(
-    new Table({
-      width: { size: tableW, type: WidthType.DXA },
-      columnWidths: colWidths,
-      layout: TableLayoutType.FIXED,
-      borders: tableBorders,
-      alignment: AlignmentType.CENTER,
-      rows: summaryRows
-    })
-  );
+  report.groups.forEach((group, idx) => {
+    // The first group now sits on page 1 under the header.
+    // Others follow meta.batchBreaks[group.name]; default is a new page.
+    const startNewPage = idx === 0 ? false : (meta.batchBreaks?.[group.name] ?? true);
 
-  // ---- Batch sections ----
-  const entryColW = [1700, 2000, 1700, 4166, 900]; // sums to 10466
-  const entryHead = ['Date', 'Trainer', 'Domain', 'Topics Covered', 'Students'];
-
-  report.batches.forEach((batch) => {
     children.push(
       new Paragraph({
-        pageBreakBefore: true,
         alignment: AlignmentType.CENTER,
-        spacing: { after: 120 },
-        children: [new TextRun({ text: `Batch - ${batch.name}`, bold: true, color: BLUE_HEX, size: 32 })]
-      })
-    );
-    children.push(
-      new Paragraph({
-        heading: HeadingLevel.HEADING_2,
-        alignment: AlignmentType.CENTER,
-        spacing: { before: 0, after: 200 },
+        keepNext: true,
+        spacing: { before: startNewPage ? 0 : 240, after: group.subtitle ? 120 : 200 },
         children: [
-          new TextRun({ text: 'Trainers: ', bold: true, color: '1E1E1E', size: 24 }),
-          new TextRun({ text: batch.trainers.join(', ') || '-', bold: false, color: '1E1E1E', size: 24 })
+          // A real, visible page-break character the admin can delete in Word
+          ...(startNewPage ? [new PageBreak()] : []),
+          new TextRun({ text: group.title, bold: true, color: BLUE_HEX, size: 32 })
         ]
       })
     );
+
+    if (group.subtitle) {
+      children.push(
+        new Paragraph({
+          heading: HeadingLevel.HEADING_2,
+          alignment: AlignmentType.CENTER,
+          keepNext: true,
+          spacing: { before: 0, after: 200 },
+          children: [
+            new TextRun({ text: `${group.subtitle.label} `, bold: true, color: '1E1E1E', size: 24 }),
+            new TextRun({ text: group.subtitle.value, bold: false, color: '1E1E1E', size: 24 })
+          ]
+        })
+      );
+    }
 
     const rows = [
       new TableRow({
         tableHeader: true,
         cantSplit: true,
-        children: entryHead.map((h, i) =>
-          wCell(h, { width: entryColW[i], bold: true, color: 'FFFFFF', fill: BLUE_HEX, size: 20 })
+        children: report.head.map((h, i) =>
+          wCell(h, { width: colW[i], bold: true, color: 'FFFFFF', fill: BLUE_HEX, size: 20 })
         )
       }),
-      ...batch.rows.map((r, idx) => {
-        const fill = idx % 2 === 0 ? GREY_HEX : 'FFFFFF';
-        const cells = [formatTableDate(r.date), r.trainer, r.domain, r.topics, r.students];
+      ...group.rows.map((cells, rIdx) => {
+        const fill = rIdx % 2 === 0 ? GREY_HEX : 'FFFFFF';
         return new TableRow({
           cantSplit: true,
-          children: cells.map((c, i) => wCell(c, { width: entryColW[i], fill, size: 20 }))
+          children: cells.map((c, i) => wCell(c, { width: colW[i], fill, size: 20 }))
         });
       })
     ];
@@ -904,16 +1010,16 @@ const renderClosureWord = async (report, meta) => {
     children.push(
       new Table({
         width: { size: WORD_CONTENT_W, type: WidthType.DXA },
-        columnWidths: entryColW,
+        columnWidths: colW,
         layout: TableLayoutType.FIXED,
         borders: tableBorders,
         rows
       })
     );
-  });
 
-  // Word expects a paragraph after the final table
-  children.push(new Paragraph({ children: [] }));
+    // Free paragraph after every table so the next group can be moved freely
+    children.push(spacer());
+  });
 
   const doc = new Document({
     sections: [
@@ -933,25 +1039,23 @@ const renderClosureWord = async (report, meta) => {
   saveAs(blob, `${buildFileBase(meta)}.docx`);
 };
 
-/* ----------------------------- Public API -------------------------------- */
+/* ------------------------------ EXPORTS --------------------------------- */
+// meta.format: 'batch' (default) | 'trainer' | 'date'
 
-/**
- * meta = { companyName, projectName, campusName, startDate: 'YYYY-MM-DD', endDate: 'YYYY-MM-DD' }
- */
 export const exportClosureReportPDF = async (entries, meta) => {
   const trainersMap = await fetchTrainersMap();
-  renderClosurePDF(buildClosureReportData(entries, trainersMap), meta);
+  renderClosurePDF(buildClosureReportData(entries, trainersMap, meta.format), meta);
 };
 
 export const exportClosureReportWord = async (entries, meta) => {
   const trainersMap = await fetchTrainersMap();
-  await renderClosureWord(buildClosureReportData(entries, trainersMap), meta);
+  await renderClosureWord(buildClosureReportData(entries, trainersMap, meta.format), meta);
 };
 
 // Builds the data once and downloads both files
 export const exportClosureReport = async (entries, meta) => {
   const trainersMap = await fetchTrainersMap();
-  const report = buildClosureReportData(entries, trainersMap);
+  const report = buildClosureReportData(entries, trainersMap, meta.format);
   renderClosurePDF(report, meta);
   await renderClosureWord(report, meta);
 };

@@ -17,14 +17,17 @@ const hasLetters = (s) => /\p{L}/u.test(s);
  *   - moved (a piece at a time) to SEVERAL curriculum lessons at once
  *
  * Props
- *  - row      : daily row { entryId, batchName, trainers, topics, module, dateKey,
- *                           extra, rawExtras, mappings, splits }
+ *  - row      : daily row { entryId, batchName, trainers, topics, module, taught, dateKey,
+ *                           extra, rawExtras, mappings, splits, ignored }
+ *               topics   = every topic taught in the session
+ *               module   = every module taught, as one text ("Basics, Functions")
+ *               taught   = [{ topic, module }] every topic / module pair taught in the session
  *               mappings = [{ extra, targets: [{ topic, module, lesson }] }]
  *               splits   = [{ source, parts: [string] }]
  *  - tree     : [{ topic, modules: [{ module, lessons: [] }] }]  (curriculum of this entry's batch)
  *  - saving   : boolean
  *  - error    : string | null
- *  - onSave   : (entryId, mappings, splits) => void
+ *  - onSave   : (entryId, mappings, splits, ignored) => void
  *  - onClose  : () => void
  */
 const ManageExtraModal = ({ row, tree, saving, error, onSave, onClose }) => {
@@ -43,14 +46,20 @@ const ManageExtraModal = ({ row, tree, saving, error, onSave, onClose }) => {
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose, saving]);
 
-  // is this text exactly a lesson of the entry's own topic / module? (then it needs no mapping)
+  // every (topic, module) the session covered; a session can cover several modules
+  const taught =
+    row.taught && row.taught.length ? row.taught : [{ topic: (row.topics || [])[0], module: row.module }];
+
+  // is this text exactly a lesson of one of the modules taught in this session? (then it needs no mapping)
   const isOwn = (text) =>
-    tree.some(
-      (t) =>
-        norm(t.topic) === norm(row.topics[0]) &&
-        t.modules.some(
-          (m) => norm(m.module) === norm(row.module) && m.lessons.some((l) => norm(l) === norm(text))
-        )
+    taught.some((p) =>
+      tree.some(
+        (t) =>
+          norm(t.topic) === norm(p.topic) &&
+          t.modules.some(
+            (m) => norm(m.module) === norm(p.module) && m.lessons.some((l) => norm(l) === norm(text))
+          )
+      )
     );
 
   // every piece of extra text: the original strings, cut up wherever the admin has split them
@@ -224,7 +233,7 @@ const ManageExtraModal = ({ row, tree, saving, error, onSave, onClose }) => {
             <h3 className="text-lg font-semibold text-gray-900">Manage extra</h3>
             <p className="text-sm text-gray-500">
               {row.batchName || 'N/A'} · {row.trainers.join(', ')} · {row.dateKey}
-              {row.topics[0] && ` · ${row.topics[0]}`}
+              {row.topics && row.topics.length > 0 && ` · ${row.topics.join(', ')}`}
               {row.module && ` › ${row.module}`}
             </p>
           </div>

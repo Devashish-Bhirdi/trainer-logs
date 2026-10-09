@@ -17,10 +17,15 @@ const cleanForFileName = (s) =>
     .replace(/[\\/:*?"<>|]+/g, '')
     .replace(/\s+/g, '_');
 
-// Column width (in characters) from the longest value in it, within min / max limits
+// Column width (in characters) from the longest line in it, within min / max limits
 const autoWidth = (rows, headers, { min = 10, max = 60 } = {}) =>
   headers.map((h) => {
-    const longest = rows.reduce((n, r) => Math.max(n, String(r[h] ?? '').length), h.length);
+    const longest = rows.reduce((n, r) => {
+      const longestLine = String(r[h] ?? '')
+        .split('\n')
+        .reduce((m, line) => Math.max(m, line.length), 0);
+      return Math.max(n, longestLine);
+    }, h.length);
     return { wch: Math.min(max, Math.max(min, longest + 2)) };
   });
 
@@ -34,6 +39,18 @@ const runsOf = (rows, keyOf) => {
     else runs.push({ key, from: i, to: i });
   });
   return runs;
+};
+
+// "Lessons covered" text for one daily row.
+// One module: the lessons joined with commas, as always.
+// Several modules: one line per module, e.g. "Basics: Variables, Loops"
+const coveredText = (r) => {
+  const modules = r.modules || [];
+  const groups = r.coveredGroups || [];
+  if (modules.length > 1 && groups.length > 0) {
+    return groups.map((g) => `${g.module}: ${g.lessons.join(', ')}`).join('\n');
+  }
+  return r.covered.join(', ');
 };
 
 // ---------- look ----------
@@ -116,7 +133,7 @@ const buildSheet = (
 
 /**
  * Exports the mapping page to an .xlsx file with two sheets:
- *   - Daily Coverage  : one row per batch, per day
+ *   - Daily Coverage  : one row per entry (session)
  *   - Pending Lessons : one row per batch / topic / module, with what is still pending
  *
  * @param {object[]} dailyRows    the dailyRows returned by buildMapping()
@@ -136,14 +153,15 @@ export const exportMappingToExcel = (dailyRows = [], meta = {}, pendingRows = []
   // ---------- Daily Coverage ----------
   if (hasDaily) {
     const headers = [
-      'Date', 'Batch', 'Trainer(s)', 'Topic(s)', 'Lessons covered', 'Extra topics', 'Hours', 'Students',
+      'Date', 'Batch', 'Trainer(s)', 'Topic(s)', 'Module(s)', 'Lessons covered', 'Extra topics', 'Hours', 'Students',
     ];
     const data = dailyRows.map((r) => ({
       'Date': dateKeyToSerial(r.dateKey),
       'Batch': r.batchName || 'N/A',
       'Trainer(s)': r.trainers.join(', '),
       'Topic(s)': r.topics.join(', '),
-      'Lessons covered': r.covered.join(', '),
+      'Module(s)': (r.modules || []).join(', '),
+      'Lessons covered': coveredText(r),
       'Extra topics': r.extra.join(', '),
       'Hours': Number(r.hours.toFixed(1)),
       'Students': r.students ?? '',
