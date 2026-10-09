@@ -9,7 +9,7 @@ import ChangePasswordForm from './ChangePasswordForm';
 import Mapping from './Mapping';
 import CurriculumManager from './curriculumManager';
 import TrainerInvoice from './TrainerInvoice';
-import FixEntriesProject from './fixEntriesProject';
+// import FixEntriesProject from './fixEntriesProject';
 
 const AdminDashboard = () => {
   const [activeTab, setActiveTab] = useState('entries');
@@ -24,8 +24,13 @@ const AdminDashboard = () => {
   const [projects, setProjects] = useState([]);
   const [campuses, setCampuses] = useState([]);
   const [batches, setBatches] = useState([]);
+  const [allCampuses, setAllCampuses] = useState([]); // for the hierarchy view only
+  const [allBatches, setAllBatches] = useState([]);   // for the hierarchy view only
+  const [openBatchGroups, setOpenBatchGroups] = useState({}); // { campusId or 'nocampus-<projectId>': true } = expanded
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
+  const [statusConfirm,setStatusConfirm] = useState(null);
+  const [statusUpdating, setStatusUpdating] = useState(false);
   const { logout, currentUser } = useAuth();
 
 
@@ -36,6 +41,7 @@ const AdminDashboard = () => {
   useEffect(() => {
     fetchProjects();
     fetchExistingTrainers();
+    fetchHierarchy();
   }, []);
 
   const fetchExistingTrainers = async () => {
@@ -165,6 +171,21 @@ const AdminDashboard = () => {
     }
   };
 
+  // Loads every campus and batch so the "Current Hierarchy" shows all projects at once
+  const fetchHierarchy = async () => {
+    try {
+      const [campusSnap, batchSnap] = await Promise.all([
+        getDocs(collection(db, 'campuses')),
+        getDocs(collection(db, 'batches')),
+      ]);
+      const byName = (a, b) => (a.name || '').toString().localeCompare((b.name || '').toString());
+      setAllCampuses(campusSnap.docs.map((d) => ({ id: d.id, ...d.data() })).sort(byName));
+      setAllBatches(batchSnap.docs.map((d) => ({ id: d.id, ...d.data() })).sort(byName));
+    } catch (error) {
+      console.error('Error fetching hierarchy:', error);
+    }
+  };
+
   const handleCreateTrainer = async (e) => {
     e.preventDefault();
     setLoading(true);
@@ -256,6 +277,7 @@ const AdminDashboard = () => {
     try {
       await addDoc(collection(db, 'projects'), {
         name: projectName,
+        isActive: true,
         createdAt: new Date()
       });
       setMessage('Project created successfully!');
@@ -287,6 +309,7 @@ const AdminDashboard = () => {
       setMessage('Campus created successfully!');
       setCampusName('');
       fetchCampuses(selectedProject); // Refresh the list
+      fetchHierarchy();
     } catch (error) {
       setMessage('Error creating campus: ' + error.message);
     }
@@ -330,6 +353,7 @@ const AdminDashboard = () => {
       if (campusIdToUse) {
         fetchBatches(selectedProject, campusIdToUse); // Refresh the list
       }
+      fetchHierarchy();
     } catch (error) {
       setMessage('Error creating batch: ' + error.message);
     }
@@ -345,7 +369,7 @@ const AdminDashboard = () => {
     }
   };
 
-  // Edit and Delete handlers for projects, campuses and batches
+  // Edit and Delete handlers for projects; batches are delete-only; campuses are not editable
   const handleEditProject = async (project) => {
     const newName = window.prompt('Enter new project name', project.name);
     if (!newName || newName.trim() === '' || newName === project.name) return;
@@ -365,6 +389,7 @@ const AdminDashboard = () => {
       }
       setMessage('Project renamed successfully');
       fetchProjects();
+      fetchHierarchy();
       if (selectedProject === project.id) setSelectedProject(project.id); // trigger campus refetch
     } catch (error) {
       setMessage('Error renaming project: ' + (error.message || error));
@@ -394,6 +419,7 @@ const AdminDashboard = () => {
       await deleteDoc(doc(db, 'projects', project.id));
       setMessage('Project and its children deleted');
       fetchProjects();
+      fetchHierarchy();
       setSelectedProject('');
       setCampuses([]);
       setBatches([]);
@@ -404,74 +430,19 @@ const AdminDashboard = () => {
     setTimeout(() => setMessage(''), 3000);
   };
 
-  const handleEditCampus = async (campus) => {
-    const newName = window.prompt('Enter new campus name', campus.name);
-    if (!newName || newName.trim() === '' || newName === campus.name) return;
-    setLoading(true);
-    try {
-      await updateDoc(doc(db, 'campuses', campus.id), { name: newName });
-      // update campusName on batches
-      const qBatch = query(collection(db, 'batches'), where('campusId', '==', campus.id));
-      const bs = await getDocs(qBatch);
-      for (const b of bs.docs) {
-        await updateDoc(doc(db, 'batches', b.id), { campusName: newName });
-      }
-      setMessage('Campus renamed successfully');
-      if (selectedProject) fetchCampuses(selectedProject);
-      if (selectedCampus === campus.id) setSelectedCampus(campus.id);
-    } catch (error) {
-      setMessage('Error renaming campus: ' + (error.message || error));
-    }
-    setLoading(false);
-    setTimeout(() => setMessage(''), 3000);
+  const toggleBatchGroup = (key) => {
+    setOpenBatchGroups((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const handleDeleteCampus = async (campus) => {
-    const ok = window.confirm(`Delete campus "${campus.name}" and all its batches? This cannot be undone.`);
-    if (!ok) return;
-    setLoading(true);
-    try {
-      // delete batches under campus
-      const qBatch = query(collection(db, 'batches'), where('campusId', '==', campus.id));
-      const bs = await getDocs(qBatch);
-      for (const b of bs.docs) {
-        await deleteDoc(doc(db, 'batches', b.id));
-      }
-      // delete campus
-      await deleteDoc(doc(db, 'campuses', campus.id));
-      setMessage('Campus and its batches deleted');
-      if (selectedProject) fetchCampuses(selectedProject);
-      setSelectedCampus('');
-      setBatches([]);
-    } catch (error) {
-      setMessage('Error deleting campus: ' + (error.message || error));
-    }
-    setLoading(false);
-    setTimeout(() => setMessage(''), 3000);
-  };
-
-  const handleEditBatch = async (batch) => {
-    const newName = window.prompt('Enter new batch name', batch.name);
-    if (!newName || newName.trim() === '' || newName === batch.name) return;
-    setLoading(true);
-    try {
-      await updateDoc(doc(db, 'batches', batch.id), { name: newName });
-      setMessage('Batch renamed successfully');
-      if (selectedProject && selectedCampus) fetchBatches(selectedProject, selectedCampus);
-    } catch (error) {
-      setMessage('Error renaming batch: ' + (error.message || error));
-    }
-    setLoading(false);
-    setTimeout(() => setMessage(''), 3000);
-  };
-
+  // Deletes ONLY the batch document. Entries, curriculum and everything else are left untouched.
   const handleDeleteBatch = async (batch) => {
-    const ok = window.confirm(`Delete batch "${batch.name}"? This cannot be undone.`);
+    const ok = window.confirm(`Delete batch "${batch.name}"? Existing entries are not affected. This cannot be undone.`);
     if (!ok) return;
     setLoading(true);
     try {
       await deleteDoc(doc(db, 'batches', batch.id));
       setMessage('Batch deleted');
+      fetchHierarchy();
       if (selectedProject && selectedCampus) fetchBatches(selectedProject, selectedCampus);
     } catch (error) {
       setMessage('Error deleting batch: ' + (error.message || error));
@@ -480,7 +451,26 @@ const AdminDashboard = () => {
     setTimeout(() => setMessage(''), 3000);
   };
 
-  // ...existing code...
+  const handleConfirmStatusChange = async () => {
+    if(!statusConfirm) return;
+    const {project, nextStatus} = statusConfirm;
+
+    setStatusUpdating(true);
+    try{
+      await updateDoc(doc(db,'projects',project.id),{isActive: nextStatus});
+      
+      setProjects((prev) => 
+        prev.map((p) => (p.id === project.id ? {...p,isActive:nextStatus} : p)) 
+      );
+      setMessage(`Project "${project.name}" is now ${nextStatus ? 'active' : 'inactive'}.`);
+    } catch (err) {
+      console.error(err);
+      setMessage('Error updating project status. Please try again.');
+    } finally {
+      setStatusUpdating(false);
+      setStatusConfirm(null);
+    }
+  }
 
   const handleSendPasswordReset = async (e) => {
     e && e.preventDefault && e.preventDefault();
@@ -662,7 +652,7 @@ const AdminDashboard = () => {
               </svg>
                Trainer Invoice
             </button>
-            <button
+            {/* <button
             onClick={() => setActiveTab('fixentries')}
             className={`py-2 px-4 sm:py-3 sm:px-6 rounded-lg font-medium text-sm flex items-center transition-all duration-200 
               ${
@@ -671,7 +661,7 @@ const AdminDashboard = () => {
                 : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
               }`}>
                 Fix Entries
-            </button>
+            </button> */}
           </nav>
         </div>
 
@@ -689,7 +679,7 @@ const AdminDashboard = () => {
 
           {activeTab === 'trainerInvoice' && <TrainerInvoice/>}
           
-          {activeTab === 'fixentries' && <FixEntriesProject/>}
+          {/* {activeTab === 'fixentries' && <FixEntriesProject/>} */}
 
           {activeTab === 'addTrainer' && (
             <div className="space-y-6">
@@ -1067,65 +1057,128 @@ const AdminDashboard = () => {
                   <div className="space-y-4">
                     {projects.map(project => (
                       <div key={project.id} className="border border-gray-200 rounded-lg p-4">
-                        <div className="flex items-center justify-between">
-                          <h4 className="font-medium text-gray-800 flex items-center">
-                            <svg className="w-4 h-4 mr-2 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
-                            </svg>
-                            {project.name}
-                          </h4>
-                          <div className="space-x-2">
-                            <button onClick={() => handleEditProject(project)} className="text-sm text-blue-600 hover:underline">Edit</button>
-                            <button onClick={() => handleDeleteProject(project)} className="text-sm text-red-600 hover:underline">Delete</button>
-                          </div>
-                        </div>
-                        
-                        <div className="mt-3 ml-6 space-y-3 border-l-2 border-blue-200 pl-4">
-                          {campuses.filter(c => c.projectId === project.id).length === 0 ? (
-                            <div className="text-gray-400 text-sm bg-gray-50 p-2 rounded">
-                              
+                        {(() => {
+                          const isActive = project.isActive !== false;
+                          return(
+                            <div className='flex items-center justify-between'>
+                              <h4 className='font-medium text-gray-800 flex items-center'>
+                                <svg className="w-4 h-4 mr-2 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                                </svg>
+                                {project.name}
+                                <span
+                                  className={`ml-3 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ${
+                                    isActive 
+                                      ? 'bg-green-50 text-green-700 border-green-200'
+                                      : 'bg-gray-100 text-gray-600 border-gray-300'
+                                  }`}>
+                                    {isActive ? 'Active' : 'Inactive'}
+                                </span>
+                              </h4>
+                              <div className="flex items-center space-x-3">
+                                <button
+                                  type='button'
+                                  role='switch'
+                                  aria-checked={isActive}
+                                  onClick={() => setStatusConfirm({project,nextStatus: !isActive})}
+                                  title={isActive ? 'Active - click to deactivate' : 'Inactive - click to activate'}
+                                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 ${
+                                    isActive ? 'bg-green-600 focus:ring-green-500' : 'bg-gray-300 focus:ring-gray-400'
+                                  }`}>
+                                <span
+                                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                    isActive ? 'translate-x-6': 'translate-x-1'
+                                  }`}/>  
+                                </button>
+                                <button onClick={() => handleEditProject(project)} className='text-sm text-blue-600 hover:underline'>Edit</button>
+                                <button onClick={() => handleDeleteProject(project)} className='text-sm text-red-600 hover:underline'>Delete</button>
+                              </div>
                             </div>
-                          ) : (
-                            campuses.filter(c => c.projectId === project.id).map(campus => (
+                          )
+                        })()}
+                        <div className="mt-3 ml-6 space-y-3 border-l-2 border-blue-200 pl-4">
+                          {/* Campuses: display only. Batches under each are collapsible and delete-only. */}
+                          {allCampuses.filter(c => c.projectId === project.id).map(campus => {
+                            const campusBatches = allBatches.filter(b => b.campusId === campus.id);
+                            const isOpen = !!openBatchGroups[campus.id];
+                            return (
                               <div key={campus.id} className="border-l-2 border-green-200 pl-3">
                                 <div className="flex items-center justify-between">
                                   <h5 className="font-medium text-gray-700 flex items-center">
                                     <svg className="w-4 h-4 mr-2 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
-                                    </svg>
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                                  </svg>
                                     {campus.name}
                                   </h5>
-                                  <div className="space-x-2">
-                                    <button onClick={() => handleEditCampus(campus)} className="text-sm text-blue-600 hover:underline">Edit</button>
-                                    <button onClick={() => handleDeleteCampus(campus)} className="text-sm text-red-600 hover:underline">Delete</button>
-                                  </div>
+                                  {campusBatches.length > 0 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleBatchGroup(campus.id)}
+                                      aria-expanded={isOpen}
+                                      className="flex items-center text-xs text-purple-700 hover:underline"
+                                    >
+                                      <svg className={`w-3.5 h-3.5 mr-1 transition-transform ${isOpen ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                    </svg>
+                                      {campusBatches.length} {campusBatches.length === 1 ? 'batch' : 'batches'}
+                                    </button>
+                                  )}
                                 </div>
-                                
-                                <div className="mt-2 ml-4 space-y-2 border-l-2 border-purple-200 pl-3">
-                                  {batches.filter(b => b.campusId === campus.id).length === 0 ? (
-                                    <div className="text-gray-400 text-sm bg-gray-50 p-2 rounded">
-                                      
-                                    </div>
-                                  ) : (
-                                    batches.filter(b => b.campusId === campus.id).map(batch => (
+
+                                {isOpen && (
+                                  <div className="mt-2 ml-4 space-y-2 border-l-2 border-purple-200 pl-3 max-h-60 overflow-y-auto">
+                                    {campusBatches.map(batch => (
                                       <div key={batch.id} className="text-gray-600 flex items-center justify-between">
                                         <div className="flex items-center">
                                           <svg className="w-4 h-4 mr-2 text-purple-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-                                          </svg>
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                                        </svg>
                                           {batch.name}
                                         </div>
-                                        <div className="space-x-2">
-                                          <button onClick={() => handleEditBatch(batch)} className="text-sm text-blue-600 hover:underline">Edit</button>
-                                          <button onClick={() => handleDeleteBatch(batch)} className="text-sm text-red-600 hover:underline">Delete</button>
-                                        </div>
+                                        <button onClick={() => handleDeleteBatch(batch)} className="text-sm text-red-600 hover:underline">Delete</button>
                                       </div>
-                                    ))
-                                  )}
-                                </div>
+                                    ))}
+                                  </div>
+                                )}
                               </div>
-                            ))
-                          )}
+                            );
+                          })}
+
+                          {/* Batches that belong to the project but have no campus */}
+                          {(() => {
+                            const noCampusBatches = allBatches.filter(b => b.projectId === project.id && !b.campusId);
+                            if (noCampusBatches.length === 0) return null;
+                            const key = `nocampus-${project.id}`;
+                            const isOpen = !!openBatchGroups[key];
+                            return (
+                              <div className="border-l-2 border-purple-200 pl-3">
+                                <div className="flex items-center justify-between">
+                                  <p className="text-xs text-gray-500">Batches without a campus</p>
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleBatchGroup(key)}
+                                    aria-expanded={isOpen}
+                                    className="flex items-center text-xs text-purple-700 hover:underline"
+                                  >
+                                    <svg className={`w-3.5 h-3.5 mr-1 transition-transform ${isOpen ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                    </svg>
+                                    {noCampusBatches.length} {noCampusBatches.length === 1 ? 'batch' : 'batches'}
+                                  </button>
+                                </div>
+                                {isOpen && (
+                                  <div className="mt-2 space-y-2 max-h-60 overflow-y-auto">
+                                    {noCampusBatches.map(batch => (
+                                      <div key={batch.id} className="text-gray-600 flex items-center justify-between">
+                                        <span>{batch.name}</span>
+                                        <button onClick={() => handleDeleteBatch(batch)} className="text-sm text-red-600 hover:underline">Delete</button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </div>
                       </div>
                     ))}
@@ -1136,6 +1189,38 @@ const AdminDashboard = () => {
           )}
         </div>
       </div>
+      {statusConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-semibold text-gray-800 mb-2">
+              {statusConfirm.nextStatus ? 'Activate project?' : 'Deactivate project?'}
+            </h3>
+            <p className="text-sm text-gray-600 mb-6">
+              Are you sure you want to mark{' '}
+              <span className="font-semibold">{statusConfirm.project.name}</span> as{' '}
+              <span className="font-semibold">{statusConfirm.nextStatus ? 'active' : 'inactive'}</span>?
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setStatusConfirm(null)}
+                disabled={statusUpdating}
+                className="px-4 py-2 text-sm rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmStatusChange}
+                disabled={statusUpdating}
+                className={`px-4 py-2 text-sm rounded-lg text-white disabled:opacity-50 ${
+                  statusConfirm.nextStatus ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'
+                }`}
+              >
+                {statusUpdating ? 'Updating...' : 'Yes, confirm'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

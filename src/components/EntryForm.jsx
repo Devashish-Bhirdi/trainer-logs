@@ -43,35 +43,52 @@ const EntryForm = ({ initialEntry = null, onSaved = () => {}, onCancel = () => {
   // Admins (anyone whose role is set and is not 'trainer') editing an EXISTING entry don't need
   // curriculum data. Old entries were created before the curriculum feature existed.
   // A missing role never counts as privileged. NOTE: this is a UI rule only, enforce it in Firestore rules too.
-  const [role,setRole] = useState(null);
-  const [roleLoading,setRoleLoading] = useState(true);
+  const [role, setRole] = useState(null);
+  const [roleLoading, setRoleLoading] = useState(true);
 
   useEffect(() => {
-  if (!currentUser) {
-    setRole(null);
-    setRoleLoading(false);
-    return;
-  }
-
-  let cancelled = false;
-  const loadRole = async () => {
-    setRoleLoading(true);
-    try {
-      const snap = await getDoc(doc(db, 'users', currentUser.uid));
-      if (!cancelled) setRole(snap.exists() ? snap.data().role || null : null);
-    } catch (error) {
-      console.error('Error loading user role:', error);
-      if (!cancelled) setRole(null);
-    } finally {
-      if (!cancelled) setRoleLoading(false);
+    if (!currentUser) {
+      setRole(null);
+      setRoleLoading(false);
+      return;
     }
-  };
-  loadRole();
 
-  return () => { cancelled = true; };
-}, [currentUser]);
+    let cancelled = false;
+    const loadRole = async () => {
+      setRoleLoading(true);
+      try {
+        const snap = await getDoc(doc(db, 'users', currentUser.uid));
+        if (!cancelled) setRole(snap.exists() ? snap.data().role || null : null);
+      } catch (error) {
+        console.error('Error loading user role:', error);
+        if (!cancelled) setRole(null);
+      } finally {
+        if (!cancelled) setRoleLoading(false);
+      }
+    };
+    loadRole();
 
-const isPrivilegedEdit = Boolean(initialEntry) && Boolean(role) && role !== 'trainer';
+    return () => { cancelled = true; };
+  }, [currentUser]);
+
+  const isPrivilegedEdit = Boolean(initialEntry) && Boolean(role) && role !== 'trainer';
+
+  // Admin = a role is set and it isn't 'trainer'. While the role is still loading (or missing),
+  // the user is treated as a trainer, so inactive projects are never shown by mistake.
+  const isAdmin = Boolean(role) && role !== 'trainer';
+
+  // Trainers can only pick active projects (missing isActive counts as active).
+  // Exception when editing: the entry's own project stays in the list even if it's now inactive,
+  // otherwise the dropdown would show "Select Project" while a project is still set underneath.
+  const selectableProjects = projects.filter(
+    (p) => isAdmin || p.isActive !== false || p.id === initialEntry?.projectId
+  );
+
+  const currentProjectData = projects.find((p) => p.id === project);
+  const isInactiveNewPick =
+    !isAdmin &&
+    currentProjectData?.isActive === false &&
+    project !== initialEntry?.projectId;
 
   // Everything below is derived from the fetched curriculum documents - no extra fetching per dropdown.
   // Each document holds { topic: { module: [lessons] } }; merge all that apply to this batch into one map.
@@ -293,6 +310,7 @@ const isPrivilegedEdit = Boolean(initialEntry) && Boolean(role) && role !== 'tra
   const missingFields = [];
   if (!date) missingFields.push('Date');
   if (!project) missingFields.push('Project');
+  if (isInactiveNewPick) missingFields.push('An active project');
   if (projectHasCampuses && !campus) missingFields.push('Campus');
   if (!batch) missingFields.push('Batch');
   if (!isPrivilegedEdit) {
@@ -510,8 +528,10 @@ const isPrivilegedEdit = Boolean(initialEntry) && Boolean(role) && role !== 'tra
               required
             >
               <option value="">Select Project</option>
-              {projects.map(p => (
-                <option key={p.id} value={p.id}>{p.name}</option>
+              {selectableProjects.map(p => (
+                <option key={p.id} value={p.id}>
+                  {p.name}{p.isActive === false ? ' (inactive)' : ''}
+                </option>
               ))}
             </select>
           </div>
