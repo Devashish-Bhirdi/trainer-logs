@@ -687,8 +687,8 @@ const buildClosureReportData = (entries, trainersMap, format = CLOSURE_FORMATS.B
 // };
 
 // POA (disabled)
-// const buildPoaLine = (meta) =>
-//   `POA (${formatOrdinalDate(parseInputDate(meta.startDate))} - ${formatOrdinalDate(parseInputDate(meta.endDate))})`;
+const buildPoaLine = (meta) =>
+  `Phase ${meta.phase} (${formatOrdinalDate(parseInputDate(meta.startDate))} - ${formatOrdinalDate(parseInputDate(meta.endDate))})`;
 
 const buildFileBase = (meta) => {
   const parts = ['Closure_Report', safeFilePart(meta.projectName)];
@@ -728,11 +728,10 @@ const renderClosurePDF = (report, meta) => {
   };
 
   // ---- Page 1: headers ----
-  centered(meta.companyName || 'Company Name', 24, 'bold', [40, 40, 40], 4);
+  centered('Gryphon Academy Pvt. Ltd', 24, 'bold', [40, 40, 40], 4);
   centered('Closure Report', 20, 'bold', BLUE_RGB, 6);
-  centered(meta.projectName || '', 14, 'normal', [60, 60, 60], 4);
-  // POA (disabled)
-  // centered(buildPoaLine(meta), 12, 'normal', [90, 90, 90], 10);
+  centered(meta.collegeName || '', 14, 'normal', [60, 60, 60], 4);
+  centered(buildPoaLine(meta), 12, 'normal', [90, 90, 90], 10);
 
   // ---- Page 1: POA summary table (disabled) ----
   // const n = report.batches.length;
@@ -907,12 +906,11 @@ const renderClosureWord = async (report, meta) => {
 
   // ---- Page 1: headers ----
   // before was 1800 when page 1 was a cover page for the POA table
-  children.push(centeredPara(meta.companyName || 'Company Name', { size: 48, bold: true, color: '282828', before: 400, after: 160 }));
+  children.push(centeredPara('Gryphon Academy Pvt. Ltd', { size: 48, bold: true, color: '282828', before: 400, after: 160 }));
   children.push(centeredPara('Closure Report', { size: 40, bold: true, color: BLUE_HEX, after: 200 }));
-  children.push(centeredPara(meta.projectName || '', { size: 28, color: '3C3C3C', after: 120 }));
+  children.push(centeredPara(meta.collegeName || '', { size: 28, color: '3C3C3C', after: 120 }));
+  children.push(centeredPara(buildPoaLine(meta),{ size: 24,color: '5A5A5A', after: 400}));
   // POA (disabled)
-  // children.push(centeredPara(buildPoaLine(meta), { size: 24, color: '5A5A5A', after: 400 }));
-
   // ---- Page 1: POA summary table (disabled) ----
   // const n = Math.max(report.batches.length, 1);
   // const fs = wordSummaryFontSize(report.batches.length);

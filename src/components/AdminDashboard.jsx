@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { collection, addDoc, getDocs, query, where, doc, setDoc, updateDoc, deleteDoc } from 'firebase/firestore';
+import { collection, addDoc, getDocs, query, where, doc, setDoc, updateDoc, deleteDoc,writeBatch, serverTimestamp, orderBy } from 'firebase/firestore';
 import { initializeApp, getApps } from 'firebase/app';
 import { createUserWithEmailAndPassword, getAuth, sendPasswordResetEmail } from 'firebase/auth';
 import { auth, db, firebaseConfig } from '../services/firebase';
@@ -24,6 +24,10 @@ const AdminDashboard = () => {
   const [projects, setProjects] = useState([]);
   const [campuses, setCampuses] = useState([]);
   const [batches, setBatches] = useState([]);
+  const [colleges, setColleges] = useState([]);
+  const [collegeId,setCollegeId] = useState('');
+  const [showAddCollege, setShowAddCollege] = useState(false);
+  const [newCollegeName,setNewCollegeName] = useState('');
   const [allCampuses, setAllCampuses] = useState([]); // for the hierarchy view only
   const [allBatches, setAllBatches] = useState([]);   // for the hierarchy view only
   const [openBatchGroups, setOpenBatchGroups] = useState({}); // { campusId or 'nocampus-<projectId>': true } = expanded
@@ -42,6 +46,7 @@ const AdminDashboard = () => {
     fetchProjects();
     fetchExistingTrainers();
     fetchHierarchy();
+    fetchColleges();
   }, []);
 
   const fetchExistingTrainers = async () => {
@@ -265,6 +270,40 @@ const AdminDashboard = () => {
     setTimeout(() => setMessage(''), 3000);
   };
 
+  const fetchColleges = async () => {
+    try{
+      const q = query(collection(db,'colleges'),orderBy('collegeName'));
+      const snap = await getDocs(q);
+      setColleges(snap.docs.map(d => ({id: d.id,...d.data()})));
+    } catch (error){
+      setMessage('Error loading colleges: ' + error.message);
+    }
+  };
+
+  const handleAddCollege = async () => {
+    const name = newCollegeName.trim();
+    if(!name) {
+      setMessage('Please enter a college name');
+      setTimeout(() => setMessage(''),3000);
+      return;
+    }
+    try{
+      const ref = await addDoc(collection(db,'colleges'),{
+        collegeName: name,
+        projects: {},
+        createdAt: new Date()
+      });
+      await fetchColleges();
+      setCollegeId(ref.id);
+      setNewCollegeName('');
+      setShowAddCollege(false);
+      setMessage(`College ${name} added`);
+    } catch (error) {
+      setMessage('Error adding college: ',error.message);
+    }
+    setTimeout(() => setMessage(''),3000);
+  };
+
   const handleCreateProject = async (e) => {
     e.preventDefault();
     if (!projectName) {
@@ -273,15 +312,34 @@ const AdminDashboard = () => {
       return;
     }
 
+    if(!collegeId) {
+      setMessage('Please choose a college');
+      setTimeout(() => setMessage(''),3000);
+      return;
+    }
+
     setLoading(true);
     try {
-      await addDoc(collection(db, 'projects'), {
+      const projectRef = doc(collection(db,'projects'));
+      const collegeRef = doc(db, 'colleges',collegeId);
+
+      const batch = writeBatch(db);
+      batch.set(projectRef,{
         name: projectName,
+        college: collegeId,
         isActive: true,
         createdAt: new Date()
       });
+      
+      batch.update(collegeRef,{
+        [`projects.${projectRef.id}`]:projectName
+      });
+      await batch.commit();
+
       setMessage('Project created successfully!');
       setProjectName('');
+      setCollegeId('');
+      fetchColleges();
       fetchProjects(); // Refresh the list
     } catch (error) {
       setMessage('Error creating project: ' + error.message);
@@ -914,6 +972,46 @@ const AdminDashboard = () => {
                         className="w-full p-2 sm:p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
                         required
                       />
+                    </div>
+                    <div>
+                      <div className='flex items-center justify-between mb-1'>
+                        <label className='block text-sm font-medium text-gray-700'> College Name</label>
+                        <button
+                          type="button"
+                          onClick={() => setShowAddCollege(!showAddCollege)}
+                          className='text-xs text-blue-600 hover:text-blue-800 font-medium'
+                        >
+                          {showAddCollege ? 'Cancel' : '+ Add new college'}
+                        </button>
+                      </div>
+
+                      {showAddCollege && (
+                        <div className='flex gap-2 mb-2'>
+                          <input 
+                            type='text'
+                            value={newCollegeName}
+                            onChange={(e) => setNewCollegeName(e.target.value)}
+                            placeholder='New college name'
+                            className='flex-1 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500'/>
+                          <button 
+                            type='button'
+                            onClick={handleAddCollege}
+                            className='px-3 py-2 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700'>
+                              Add
+                          </button>
+                        </div>
+                      )}
+                      <select
+                        value={collegeId}
+                        onChange={(e) => setCollegeId(e.target.value)}
+                        className='w-full p-2 sm:p-3 border border-gray-300 rounded-lg foucs:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors'
+                        required
+                      >
+                        <option value="">Select a college</option>
+                        {colleges.map((c) => (
+                          <option key={c.id} value={c.id}>{c.collegeName}</option>
+                        ))}
+                      </select>
                     </div>
                     <button
                       type="submit"

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { collection, query, where, getDocs, orderBy, onSnapshot } from 'firebase/firestore';
+import { collection, query, where, getDocs, getDoc,doc, orderBy, onSnapshot } from 'firebase/firestore';
 import { db } from '../services/firebase';
 import {
   exportToPDF,
@@ -52,6 +52,8 @@ const EntryListForAdmin = () => {
   const [dateDraft, setDateDraft] = useState({ startDate: '', endDate: '' });
   const [projectHasCampuses, setProjectHasCampuses] = useState(true);
   const [editingEntry,setEditingEntry] = useState(null);
+  const [showPhaseModal,setShowPhaseModal] = useState(false);
+  const [phaseInput,setPhaseInput] = useState('');
 
   const handleEdit = (entry) => setEditingEntry(entry);
 
@@ -321,7 +323,7 @@ const EntryListForAdmin = () => {
     }
   };
 
-  const handleClosureReport = async () => {
+  const handleClosureReport = async (phase) => {
     if (!canGenerateClosureReport || generatingReport) return;
 
     const start = parseInputDate(dateDraft.startDate);
@@ -359,10 +361,17 @@ const EntryListForAdmin = () => {
 
       const project = projects.find(p => p.id === filters.project);
       const campus = campuses.find(c => c.id === filters.campus);
+      let collegeName = '';
+      if (project.college) {
+        const collegeSnap = await getDoc(doc(db,'colleges',project.college));
+        collegeName = collegeSnap.exists() ? collegeSnap.data().collegeName : '';
+      }
 
       await exportClosureReport(reportEntries, {
         companyName: COMPANY_NAME,
+        collegeName: collegeName,
         projectName: project ? project.name : '',
+        phase,
         campusName: campus && projectHasCampuses ? campus.name : '',
         startDate: dateDraft.startDate,
         endDate: dateDraft.endDate,
@@ -520,7 +529,10 @@ const EntryListForAdmin = () => {
               </select>
             </div>
             <button
-              onClick={handleClosureReport}
+              onClick={() => {
+                setPhaseInput('');
+                setShowPhaseModal(true);
+              }}
               disabled={generatingReport || !canGenerateClosureReport}
               className="h-10 px-4 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 text-sm whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
             >
@@ -603,6 +615,49 @@ const EntryListForAdmin = () => {
               onCancel={() => setEditingEntry(null)}
               />
           </div>
+        </div>
+      )}
+      {showPhaseModal && (
+        <div className='fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4'>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const phase = phaseInput.trim();
+              if (!phase) return;
+              setShowPhaseModal(false);
+              handleClosureReport(phase);
+            }}
+            className='w-full max-w-sm bg-white rounded-lg shadow-xl p-5 space-y-4'>
+            <h3 className='text-lg font-semibold text-gray-800'>Closure Report</h3> 
+            <div>
+              <label className='block text-sm font-medium text-gray-700 mb-1'>Phase Number</label>
+              <input 
+                type="number"
+                min="1"
+                autoFocus
+                value={phaseInput}
+                onChange={(e) => setPhaseInput(e.target.value)}
+                placeholder='e.g. 1'
+                className='w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500'
+                required
+              />
+            </div>
+            <div className='flex justify-end gap-2'>
+              <button
+                type='button'
+                onClick={() => setShowPhaseModal(false)}
+                className='px-4 py-2 text-sm text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200'>
+                  Cancel
+              </button>
+              <button
+                type='submit'
+                disabled={!phaseInput.trim()}
+                className='px-4 py-2 text-sm text-white bg-indigo-600 rounded-md hover:bg-indigo-700 disabled:opacity-60'
+              >
+                Generate
+              </button>
+            </div> 
+          </form>
         </div>
       )}
     </div>
