@@ -264,7 +264,7 @@ const InvoicePackModal = ({ trainers, filters, filterLabels, onClose }) => {
         if (!r || r.status !== 'merged' || !include.has(r.key)) return;
 
         // keep file names unique if two trainers share a name
-        const base = safeName(r.name);
+        const base = `${safeName(filterLabels.collegeName || 'college')}_${safeName(r.name)}`;
         let n = 1;
         let suffix = '';
         while (used.has(`${base}${suffix}`)) {
@@ -273,7 +273,7 @@ const InvoicePackModal = ({ trainers, filters, filterLabels, onClose }) => {
         }
         used.add(`${base}${suffix}`);
 
-        zipFiles.push({ name: `${base}${suffix}_merged.pdf`, bytes: r.mergedBytes });
+        zipFiles.push({ name: `${base}${suffix}.pdf`, bytes: r.mergedBytes });
         if (includeEntries) zipFiles.push({ name: `${base}${suffix}_entries.pdf`, bytes: r.entriesBytes });
       });
 

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { collection, query, where, getDocs } from 'firebase/firestore';
+import { collection, query, where, getDocs,doc,getDoc } from 'firebase/firestore';
 import { db } from '../services/firebase';
 import InvoicePackModal from './InvoicePackModal';
 
@@ -34,6 +34,7 @@ const TrainerInvoice = () => {
   const [projects, setProjects] = useState([]);
   const [campuses, setCampuses] = useState([]);
   const [batches, setBatches] = useState([]);
+  const [collegeName,setCollegeName] = useState('');
   const [trainers, setTrainers] = useState([]);
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [projectHasCampuses, setProjectHasCampuses] = useState(true);
@@ -112,6 +113,31 @@ const TrainerInvoice = () => {
       setShowPack(false);
     }
   }, [filters.project]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const collegeId = projects.find((p) => p.id === filters.project)?.college;
+
+    if (!collegeId){
+      setCollegeName('');
+      return undefined;
+    }
+
+    const loadCollege = async () => {
+      try{
+        const snap = await getDoc(doc(db,'colleges',collegeId));
+        if (!cancelled) setCollegeName(snap.exists() ? snap.data().collegeName || '' : '');
+      } catch (error){
+        console.error('Error fetching college:', error);
+        if (!cancelled) setCollegeName('');
+      }
+    };
+    loadCollege();
+
+    return () => {
+      cancelled = true;
+    }
+  },[filters.project,projects]);
 
   // campus changed -> load that campus's batches
   useEffect(() => {
@@ -296,6 +322,7 @@ const TrainerInvoice = () => {
             companyName: 'Training Management System',
             projectName: projects.find((p) => p.id === filters.project)?.name,
             campusName: campuses.find((c) => c.id === filters.campus)?.name,
+            collegeName,
             batchName: batches.find((b) => b.id === filters.batch)?.name,
             startDate: filters.startDate,
             endDate: filters.endDate,
