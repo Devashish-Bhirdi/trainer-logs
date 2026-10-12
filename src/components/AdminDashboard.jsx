@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { collection, addDoc, getDocs, query, where, doc, setDoc, updateDoc, deleteDoc,writeBatch, serverTimestamp, orderBy } from 'firebase/firestore';
+import { collection, addDoc, getDocs, query, where, doc, setDoc, updateDoc, deleteDoc,writeBatch, serverTimestamp, orderBy, deleteField } from 'firebase/firestore';
 import { initializeApp, getApps } from 'firebase/app';
 import { createUserWithEmailAndPassword, getAuth, sendPasswordResetEmail } from 'firebase/auth';
 import { auth, db, firebaseConfig } from '../services/firebase';
@@ -9,6 +9,7 @@ import ChangePasswordForm from './ChangePasswordForm';
 import Mapping from './Mapping';
 import CurriculumManager from './curriculumManager';
 import TrainerInvoice from './TrainerInvoice';
+import CollegesDebug from './collegeEditDeleteTrial';
 // import FixEntriesProject from './fixEntriesProject';
 
 const AdminDashboard = () => {
@@ -431,24 +432,41 @@ const AdminDashboard = () => {
   const handleEditProject = async (project) => {
     const newName = window.prompt('Enter new project name', project.name);
     if (!newName || newName.trim() === '' || newName === project.name) return;
+    const trimmedName = newName.trim();
+
     setLoading(true);
     try {
-      await updateDoc(doc(db, 'projects', project.id), { name: newName });
-      // update projectName on campuses and batches
-      const qCamp = query(collection(db, 'campuses'), where('projectId', '==', project.id));
-      const camps = await getDocs(qCamp);
-      for (const c of camps.docs) {
-        await updateDoc(doc(db, 'campuses', c.id), { projectName: newName });
+      const batch = writeBatch(db);
+
+      batch.update(doc(db,'projects',project.id),{name: trimmedName});
+      
+      const camps = await getDocs(
+        query(collection(db,'campuses'),where('projectId','==',project.id))
+      );
+      camps.docs.forEach((c) => 
+        batch.update(doc(db,'campuses',c.id),{projectName: trimmedName})
+      );
+
+      const bs = await getDocs(
+        query(collection(db,'batches'),where('projectId','==',project.id))
+      );
+      bs.docs.forEach((b) => 
+        batch.update(doc(db,'batches',b.id),{projectName:trimmedName})
+      );
+
+      if(project.college){
+        batch.update(doc(db,'colleges',project.college),{
+          [`projects.${project.id}`]: trimmedName,
+        });
       }
-      const qBatch = query(collection(db, 'batches'), where('projectId', '==', project.id));
-      const bs = await getDocs(qBatch);
-      for (const b of bs.docs) {
-        await updateDoc(doc(db, 'batches', b.id), { projectName: newName });
-      }
+
+      await batch.commit();
+
       setMessage('Project renamed successfully');
       fetchProjects();
       fetchHierarchy();
-      if (selectedProject === project.id) setSelectedProject(project.id); // trigger campus refetch
+      fetchColleges();
+      if(selectedProject === project.id) setSelectedProject(project.id);
     } catch (error) {
       setMessage('Error renaming project: ' + (error.message || error));
     }
@@ -457,27 +475,43 @@ const AdminDashboard = () => {
   };
 
   const handleDeleteProject = async (project) => {
-    const ok = window.confirm(`Delete project "${project.name}" and all its campuses and batches? This cannot be undone.`);
+    const ok = window.confirm(
+      `Delete project "${project.name}" and all its campuses and batches? This cannot be undone.`
+    );
     if (!ok) return;
+
     setLoading(true);
     try {
-      // delete batches under project
-      const qBatch = query(collection(db, 'batches'), where('projectId', '==', project.id));
-      const bs = await getDocs(qBatch);
-      for (const b of bs.docs) {
-        await deleteDoc(doc(db, 'batches', b.id));
+      const batch = writeBatch(db);
+
+      // 1. Batches under project
+      const bs = await getDocs(
+        query(collection(db, 'batches'), where('projectId', '==', project.id))
+      );
+      bs.docs.forEach((b) => batch.delete(doc(db, 'batches', b.id)));
+
+      // 2. Campuses under project
+      const camps = await getDocs(
+        query(collection(db, 'campuses'), where('projectId', '==', project.id))
+      );
+      camps.docs.forEach((c) => batch.delete(doc(db, 'campuses', c.id)));
+
+      // 3. Remove project entry from the college's projects map
+      if (project.college) {
+        batch.update(doc(db, 'colleges', project.college), {
+          [`projects.${project.id}`]: deleteField(),
+        });
       }
-      // delete campuses under project
-      const qCamp = query(collection(db, 'campuses'), where('projectId', '==', project.id));
-      const camps = await getDocs(qCamp);
-      for (const c of camps.docs) {
-        await deleteDoc(doc(db, 'campuses', c.id));
-      }
-      // delete project
-      await deleteDoc(doc(db, 'projects', project.id));
+
+      // 4. Project doc itself
+      batch.delete(doc(db, 'projects', project.id));
+
+      await batch.commit();
+
       setMessage('Project and its children deleted');
       fetchProjects();
       fetchHierarchy();
+      fetchColleges(); // college's projects map changed
       setSelectedProject('');
       setCampuses([]);
       setBatches([]);
@@ -694,7 +728,7 @@ const AdminDashboard = () => {
               </svg>
               Shortlist
             </button> */}
-                        <button
+            <button
             onClick={() => setActiveTab('trainerInvoice')}
             className={`py-2 px-4 sm:py-3 sm:px-6 rounded-lg font-medium text-sm flex items-center transition-all duration-200 
               ${
@@ -720,6 +754,22 @@ const AdminDashboard = () => {
               }`}>
                 Fix Entries
             </button> */}
+            <button
+            onClick={() => setActiveTab('collegeTrial')}
+            className={`py-2 px-4 sm:py-3 sm:px-6 rounded-lg font-medium text-sm flex items-center transition-all duration-200 
+              ${
+                activeTab === 'collegeTrial'
+                ? 'bg-blue-100 text-blue-700 shadow-inner'
+                : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              <svg className={`w-5 h-5 mr-2 ${activeTab === 'collegeTrial' ? 'text-blue-600' : 'text-gray-400'}`} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M14.25 2.75H7.5A2.25 2.25 0 005.25 5v14a2.25 2.25 0 002.25 2.25h9A2.25 2.25 0 0018.75 19V7.25L14.25 2.75z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M14.25 2.75V6a1.25 1.25 0 001.25 1.25h3.25" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6M9 15.25h6M9 18.5h3" />
+              </svg>
+               College Trial
+            </button>
           </nav>
         </div>
 
@@ -738,6 +788,8 @@ const AdminDashboard = () => {
           {activeTab === 'trainerInvoice' && <TrainerInvoice/>}
           
           {/* {activeTab === 'fixentries' && <FixEntriesProject/>} */}
+
+          {activeTab === 'collegeTrial' && <CollegesDebug />}
 
           {activeTab === 'addTrainer' && (
             <div className="space-y-6">
