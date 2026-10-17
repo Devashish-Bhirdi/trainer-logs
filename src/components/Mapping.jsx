@@ -23,6 +23,13 @@ const unique = (list) => {
   });
 };
 
+// Accepts an array, a single string, or nothing, and always returns a clean list of non-empty strings.
+// Used to read the older entry fields (lessons / subtopics / subtopic / extraLessons).
+const asList = (v) =>
+  (Array.isArray(v) ? v : v ? [v] : [])
+    .map((x) => (typeof x === 'string' ? x.trim() : x))
+    .filter((x) => typeof x === 'string' && x !== '');
+
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sept', 'Oct', 'Nov', 'Dec'];
 
 // Firestore Timestamp | Date | 'YYYY-MM-DD'  ->  'YYYY-MM-DD'
@@ -63,11 +70,12 @@ const normalizeIgnored = (list) =>
 //   items : one per lesson text, each with the (topic, module) pair(s) it should be looked up in
 //   pairs : every (topic, module) the session covered
 //
-// - Entries WITH a `coverage` field (new form): every ticked lesson is looked up in its own module,
-//   so a session that covered several modules is matched correctly. "Extra lessons" typed by the
-//   trainer have no module, so they are tried against all the modules of the session.
-// - Entries WITHOUT `coverage` (older entries): exactly as before, a flat `lessons` list looked up
-//   under the entry's single topic / module.
+// - Entries WITH a non-empty `coverage` field (new form): every ticked lesson is looked up in its own
+//   module, so a session that covered several modules is matched correctly. "Extra lessons" typed by
+//   the trainer have no module, so they are tried against all the modules of the session.
+// - Entries WITHOUT usable `coverage` (older entries, or entries saved with an empty coverage):
+//   every legacy source is read and merged, so an empty `lessons: []` can no longer hide a filled
+//   `subtopic`. They are looked up under the entry's single topic / module.
 const sessionItems = (entry) => {
   const groups = (Array.isArray(entry.coverage) ? entry.coverage : []).filter(
     (g) => g && Array.isArray(g.lessons)
@@ -99,8 +107,15 @@ const sessionItems = (entry) => {
     return { items, pairs };
   }
 
-  // older entries saved a single "subtopic" text instead of a lessons list
-  const lessons = Array.isArray(entry.lessons) ? entry.lessons : (entry.subtopic ? [entry.subtopic] : []);
+  // Older entries: a flat lessons list and/or a single "subtopic" text.
+  // Everything is merged (and de-duplicated). `extraLessons` is included for entries whose
+  // coverage came out empty but where the trainer still typed extra lessons.
+  const lessons = unique([
+    ...asList(entry.lessons),
+    ...asList(entry.subtopics),
+    ...asList(entry.subtopic),
+    ...asList(entry.extraLessons),
+  ]);
   const pairs = [{ topic: entry.topic, module: entry.module }];
   return { items: lessons.map((text) => ({ text, pairs })), pairs };
 };
