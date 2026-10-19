@@ -9,6 +9,7 @@ import ChangePasswordForm from './ChangePasswordForm';
 import Mapping from './Mapping';
 import CurriculumManager from './curriculumManager';
 import TrainerInvoice from './TrainerInvoice';
+import { sendTrainerRemindersViaResend, openOutlookMailto } from '../services/emailService';
 // import FixEntriesProject from './fixEntriesProject';
 
 const AdminDashboard = () => {
@@ -40,6 +41,15 @@ const AdminDashboard = () => {
 
   const [existingTrainers, setExistingTrainers] = useState([]);
   const [trainerSearchTerm, setTrainerSearchTerm] = useState('');
+
+  const [selectedTrainerIds, setSelectedTrainerIds] = useState([]);
+
+  // Resend Reminder Modal State
+  const [isReminderModalOpen, setIsReminderModalOpen] = useState(false);
+  const [reminderSubject, setReminderSubject] = useState('');
+  const [reminderCustomMessage, setReminderCustomMessage] = useState('');
+  const [sendingReminder, setSendingReminder] = useState(false);
+  const [reminderError, setReminderError] = useState('');
 
   // Load data from Firestore
   useEffect(() => {
@@ -582,6 +592,72 @@ const AdminDashboard = () => {
     setTimeout(() => setMessage(''), 3000);
   };
 
+  const handleToggleTrainerSelection = (trainerId) => {
+    setSelectedTrainerIds(prev =>
+      prev.includes(trainerId) ? prev.filter(id => id !== trainerId) : [...prev, trainerId]
+    );
+  };
+
+  const handleSelectAllTrainers = (filteredTrainers) => {
+    const allIds = filteredTrainers.map(t => t.id || t.email);
+    const allSelected = allIds.every(id => selectedTrainerIds.includes(id));
+    if (allSelected) {
+      setSelectedTrainerIds(prev => prev.filter(id => !allIds.includes(id)));
+    } else {
+      setSelectedTrainerIds(prev => Array.from(new Set([...prev, ...allIds])));
+    }
+  };
+
+  const handleOpenReminderModal = (trainers) => {
+    const selected = trainers.filter(t => selectedTrainerIds.includes(t.id || t.email));
+    if (selected.length === 0) {
+      alert('Please select at least one trainer by checking the box next to their name.');
+      return;
+    }
+    const today = new Date();
+    const dateStr = today.toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' });
+    setReminderSubject(`Training Log Reminder – ${dateStr}`);
+    setReminderCustomMessage('');
+    setReminderError('');
+    setIsReminderModalOpen(true);
+  };
+
+  const handleSendReminderViaResend = async () => {
+    const selected = existingTrainers.filter(t => selectedTrainerIds.includes(t.id || t.email));
+    if (selected.length === 0) return;
+
+    setSendingReminder(true);
+    setReminderError('');
+
+    try {
+      const result = await sendTrainerRemindersViaResend({
+        trainers: selected,
+        subject: reminderSubject,
+        customMessage: reminderCustomMessage
+      });
+
+      setMessage(`✅ Reminder emails successfully sent to ${result.count || selected.length} trainer(s) via Resend!`);
+      setIsReminderModalOpen(false);
+      setSelectedTrainerIds([]);
+      setTimeout(() => setMessage(''), 6000);
+    } catch (err) {
+      console.error('Error sending reminder via Resend:', err);
+      setReminderError(err.message || 'Failed to send reminders.');
+    } finally {
+      setSendingReminder(false);
+    }
+  };
+
+  const handleSendReminderViaOutlook = () => {
+    const selected = existingTrainers.filter(t => selectedTrainerIds.includes(t.id || t.email));
+    openOutlookMailto({
+      trainers: selected,
+      subject: reminderSubject,
+      message: reminderCustomMessage
+    });
+    setIsReminderModalOpen(false);
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50">
       {/* Header */}
@@ -873,19 +949,44 @@ const AdminDashboard = () => {
                   </h3>
 
                   {/* Search Bar */}
-                  <div className="relative w-full sm:w-72">
-                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                      <svg className="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                      </svg>
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
+                    {/* Search Bar */}
+                    <div className="relative w-full sm:w-72">
+                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                        <svg className="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                        </svg>
+                      </div>
+                      <input
+                        type="text"
+                        value={trainerSearchTerm}
+                        onChange={(e) => setTrainerSearchTerm(e.target.value)}
+                        placeholder="Search by name or email..."
+                        className="w-full pl-9 pr-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white transition-colors"
+                      />
                     </div>
-                    <input
-                      type="text"
-                      value={trainerSearchTerm}
-                      onChange={(e) => setTrainerSearchTerm(e.target.value)}
-                      placeholder="Search by name or email..."
-                      className="w-full pl-9 pr-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white transition-colors"
-                    />
+
+                    {/* Send Reminder Button */}
+                    <button
+                      id="send-reminder-btn"
+                      onClick={() => handleOpenReminderModal(existingTrainers)}
+                      title={selectedTrainerIds.length === 0 ? 'Select trainers below to send reminders' : `Send reminder to ${selectedTrainerIds.length} trainer(s)`}
+                      className={`flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-all duration-200 shadow-sm whitespace-nowrap ${
+                        selectedTrainerIds.length > 0
+                          ? 'bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white border-amber-500 hover:shadow-md cursor-pointer'
+                          : 'bg-white text-gray-400 border-gray-300 cursor-default opacity-60'
+                      }`}
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+                      </svg>
+                      Send Reminder
+                      {selectedTrainerIds.length > 0 && (
+                        <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-white text-orange-600 text-xs font-bold">
+                          {selectedTrainerIds.length}
+                        </span>
+                      )}
+                    </button>
                   </div>
                 </div>
 
@@ -927,6 +1028,16 @@ const AdminDashboard = () => {
                         <table className="min-w-full divide-y divide-gray-200">
                           <thead className="bg-gray-100">
                             <tr>
+                              <th className='px-4 py-3 text-left'>
+                                <input
+                                  id="select-all-trainers"
+                                  type='checkbox'
+                                  className='w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer'
+                                  checked={filteredTrainers.length > 0 && filteredTrainers.every(t => selectedTrainerIds.includes(t.id || t.email))}
+                                  onChange={() => handleSelectAllTrainers(filteredTrainers)}
+                                  title="Select all"
+                                />
+                              </th>
                               <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">#</th>
                               <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Trainer Name</th>
                               <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Trainer Email</th>
@@ -935,16 +1046,29 @@ const AdminDashboard = () => {
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-200">
-                            {filteredTrainers.map((trainer, index) => (
-                              <tr key={trainer.id || index} className="hover:bg-gray-50 transition-colors">
-                                <td className="px-4 py-3 text-sm text-gray-500">{index + 1}</td>
-                                <td className="px-4 py-3 text-sm font-medium text-gray-900 flex items-center space-x-2">
-                                  <span>{trainer.name || 'N/A'}</span>
-                                  {trainer.entryCount === 0 && (
-                                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300">
-                                      NEW
-                                    </span>
-                                  )}
+                            {filteredTrainers.map((trainer, index) => {
+                              const trainerId = trainer.id || trainer.email;
+                              const isChecked = selectedTrainerIds.includes(trainerId);
+                              return(
+                              <tr key={trainer.id || index} className={`transition-colors ${isChecked ? 'bg-amber-50' : 'hover:bg-gray-50 '}`}>
+                                <td className="px-4 py-3">
+                                  <input 
+                                    type='checkbox'
+                                    className='w-4 h-4 rounded border-gray-300 text-amber-500 focus:ring-amber-400 cursor-point'
+                                    checked={isChecked}
+                                    onChange={() => handleToggleTrainerSelection(trainerId)}
+                                  /> 
+                                </td>
+                                <td className='px-4 py-3 text-sm text-gray-500'>{index + 1}</td>
+                                <td className="px-4 py-3 text-sm font-medium text-gray-900">
+                                  <div className='flex items-center space-x-2'>
+                                    <span>{trainer.name || 'N/A'}</span>
+                                    {trainer.entryCount === 0 && (
+                                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300">
+                                        NEW
+                                      </span>
+                                    )}
+                                  </div>  
                                 </td>
                                 <td className="px-4 py-3 text-sm text-gray-600">{trainer.email || 'N/A'}</td>
                                 <td className="px-4 py-3 text-sm font-semibold text-blue-700">
@@ -963,7 +1087,8 @@ const AdminDashboard = () => {
                                   </button>
                                 </td>
                               </tr>
-                            ))}
+                              );
+                            })}
                           </tbody>
                         </table>
                       </div>
@@ -1352,7 +1477,167 @@ const AdminDashboard = () => {
           </div>
         </div>
       )}
-    </div>
+            {/* Reminder Email Modal */}
+      {isReminderModalOpen && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden border border-gray-200 animate-in fade-in zoom-in-95 duration-200">
+            {/* Modal Header */}
+            <div className="bg-gradient-to-r from-blue-700 via-indigo-700 to-blue-800 p-6 text-white flex items-center justify-between">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-full bg-white/20 backdrop-blur-md flex items-center justify-center">
+                  <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold">Send Training Log Reminder</h3>
+                  <p className="text-xs text-blue-200">Delivered directly via Resend email service</p>
+                </div>
+              </div>
+              <button
+                onClick={() => !sendingReminder && setIsReminderModalOpen(false)}
+                className="text-white/80 hover:text-white rounded-lg p-1.5 hover:bg-white/10 transition-colors"
+                disabled={sendingReminder}
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 space-y-4">
+              {/* Recipients summary */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                    Selected Trainers ({selectedTrainerIds.length})
+                  </label>
+                  <span className="text-xs text-blue-600 font-medium">Individual personalized emails</span>
+                </div>
+                <div className="max-h-28 overflow-y-auto p-2 bg-gray-50 rounded-lg border border-gray-200 space-y-1">
+                  {existingTrainers
+                    .filter(t => selectedTrainerIds.includes(t.id || t.email))
+                    .map((t, idx) => (
+                      <div key={t.id || idx} className="flex items-center justify-between text-xs py-1 px-2 bg-white rounded border border-gray-100 shadow-2xs">
+                        <span className="font-medium text-gray-800">{t.name || 'Unnamed Trainer'}</span>
+                        <span className="text-gray-500 font-mono">{t.email}</span>
+                      </div>
+                    ))}
+                </div>
+              </div>
+
+              {/* Subject */}
+              <div>
+                <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wider mb-1">
+                  Subject Line
+                </label>
+                <input
+                  type="text"
+                  value={reminderSubject}
+                  onChange={(e) => setReminderSubject(e.target.value)}
+                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  required
+                />
+              </div>
+
+              {/* Custom message */}
+              <div>
+                <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wider mb-1">
+                  Optional Note / Instructions
+                </label>
+                <textarea
+                  value={reminderCustomMessage}
+                  onChange={(e) => setReminderCustomMessage(e.target.value)}
+                  placeholder="e.g., Please ensure today's logs are submitted before 6:00 PM for reporting."
+                  rows={3}
+                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none"
+                />
+              </div>
+
+              {/* Sender Info Badge */}
+              <div className="flex items-center justify-between p-3 bg-blue-50/70 border border-blue-200/80 rounded-lg text-xs">
+                <div className="flex items-center space-x-2 text-blue-900">
+                  <svg className="w-4 h-4 text-blue-600 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                  </svg>
+                  <span>From: <strong>Gryphon Academy</strong> &lt;reminders@gryphonacademy.co.in&gt;</span>
+                </div>
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-2xs font-semibold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                  Resend Verified
+                </span>
+              </div>
+
+              {/* Error banner */}
+              {reminderError && (
+                <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700 flex flex-col gap-1">
+                  <div className="flex items-center">
+                    <svg className="w-4 h-4 mr-1.5 text-red-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <span className="font-semibold">Error sending email:</span>
+                  </div>
+                  <p className="ml-5 text-red-600">{reminderError}</p>
+                  <p className="ml-5 text-gray-500 mt-1">
+                    You can still use the <strong>Open in Outlook</strong> button below as a backup.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Actions */}
+            <div className="p-4 bg-gray-50 border-t border-gray-200 flex flex-col sm:flex-row items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={handleSendReminderViaOutlook}
+                disabled={sendingReminder}
+                title="Open default Outlook mail client with draft"
+                className="w-full sm:w-auto px-3 py-2 text-xs font-medium text-gray-700 bg-white hover:bg-gray-100 border border-gray-300 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+              >
+                <svg className="w-3.5 h-3.5 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                </svg>
+                Open in Outlook
+              </button>
+
+              <div className="flex items-center space-x-2 w-full sm:w-auto justify-end">
+                <button
+                  type="button"
+                  onClick={() => setIsReminderModalOpen(false)}
+                  disabled={sendingReminder}
+                  className="px-4 py-2 text-xs font-medium text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-200 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSendReminderViaResend}
+                  disabled={sendingReminder}
+                  className="px-5 py-2 text-xs font-semibold text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 rounded-lg shadow-sm hover:shadow transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
+                >
+                  {sendingReminder ? (
+                    <>
+                      <svg className="animate-spin h-3.5 w-3.5 text-white" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                      Sending via Resend...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                      </svg>
+                      Send via Resend ({selectedTrainerIds.length})
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>  
   );
 };
 
