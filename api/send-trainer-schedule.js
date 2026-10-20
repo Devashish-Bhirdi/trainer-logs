@@ -12,8 +12,12 @@ const escapeHtml = (value) =>
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
 
-function buildScheduleHtml(trainer) {
-  const rows = trainer.rows.map((r) => `
+function buildScheduleTable(rows) {
+  if (!rows.length) return '';
+
+  const body = rows
+    .map(
+      (r) => `
     <tr>
       <td>${escapeHtml(r.date)}</td>
       <td>${escapeHtml(r.batch)}</td>
@@ -22,10 +26,65 @@ function buildScheduleHtml(trainer) {
       <td>${escapeHtml(r.foodLodging)}</td>
       <td>${escapeHtml(r.travel)}</td>
       <td>${escapeHtml(r.totalAmount)}</td>
-      <td>${escapeHtml(r.particular)}</td>
-      <td>${escapeHtml(r.total)}</td>
     </tr>
-  `).join('');
+  `
+    )
+    .join('');
+
+  return `
+    <h3 style="margin:24px 0 8px">Schedule</h3>
+    <table cellpadding="8" cellspacing="0" border="1"
+      style="border-collapse:collapse;width:100%;
+      font-size:12px;border-color:#d1d5db">
+      <thead style="background:#1e3a8a;color:white">
+        <tr>
+          <th>Date</th>
+          <th>Batch</th>
+          <th>Time</th>
+          <th>Hour</th>
+          <th>Food + Lodging/Day</th>
+          <th>Travel To &amp; Fro</th>
+          <th>Total Amount</th>
+        </tr>
+      </thead>
+      <tbody>${body}</tbody>
+    </table>
+  `;
+}
+
+function buildSummaryTable(summary) {
+  if (!summary.length) return '';
+
+  const body = summary
+    .map(
+      (s) => `
+    <tr>
+      <td>${escapeHtml(s.particular)}</td>
+      <td>${escapeHtml(s.total)}</td>
+    </tr>
+  `
+    )
+    .join('');
+
+  return `
+    <h3 style="margin:24px 0 8px">Summary</h3>
+    <table cellpadding="8" cellspacing="0" border="1"
+      style="border-collapse:collapse;width:100%;
+      font-size:12px;border-color:#d1d5db">
+      <thead style="background:#1e3a8a;color:white">
+        <tr>
+          <th style="text-align:left">Particular</th>
+          <th style="text-align:left">Total</th>
+        </tr>
+      </thead>
+      <tbody>${body}</tbody>
+    </table>
+  `;
+}
+
+function buildScheduleHtml(trainer) {
+  const rows = Array.isArray(trainer.rows) ? trainer.rows : [];
+  const summary = Array.isArray(trainer.summary) ? trainer.summary : [];
 
   return `
     <div style="font-family:Arial,sans-serif;color:#1f2937">
@@ -40,24 +99,8 @@ function buildScheduleHtml(trainer) {
       <p><strong>Cost/day:</strong>
         ${escapeHtml(trainer.costPerDay)}</p>
 
-      <table cellpadding="8" cellspacing="0" border="1"
-        style="border-collapse:collapse;width:100%;
-        font-size:12px;border-color:#d1d5db">
-        <thead style="background:#1e3a8a;color:white">
-          <tr>
-            <th>Date</th>
-            <th>Batch</th>
-            <th>Time</th>
-            <th>Hour</th>
-            <th>Food + Lodging/Day</th>
-            <th>Travel To &amp; Fro</th>
-            <th>Total Amount</th>
-            <th>Particular</th>
-            <th>Total</th>
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
+      ${buildScheduleTable(rows)}
+      ${buildSummaryTable(summary)}
 
       <p style="margin-top:24px">
         Regards,<br/>Gryphon Academy Admin Team
@@ -65,6 +108,10 @@ function buildScheduleHtml(trainer) {
     </div>
   `;
 }
+
+const hasContent = (t) =>
+  (Array.isArray(t.rows) && t.rows.length > 0) ||
+  (Array.isArray(t.summary) && t.summary.length > 0);
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -102,13 +149,13 @@ export default async function handler(req, res) {
     (t) =>
       !t?.name ||
       !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t.email || '') ||
-      !Array.isArray(t.rows) ||
-      t.rows.length === 0
+      !hasContent(t)
   );
 
   if (invalid) {
     return res.status(400).json({
-      error: 'Each trainer must have a valid email and schedule rows.',
+      error:
+        'Each trainer must have a valid email and at least one schedule or summary row.',
     });
   }
 
@@ -119,32 +166,27 @@ export default async function handler(req, res) {
     for (let i = 0; i < trainers.length; i += 100) {
       const chunk = trainers.slice(i, i + 100);
 
-      const response = await fetch(
-        'https://api.resend.com/emails/batch',
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${RESEND_API_KEY}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(
-            chunk.map((trainer) => ({
-              from: FROM_EMAIL,
-              to: [trainer.email],
-              subject: 'Trainer Schedule Details',
-              html: buildScheduleHtml(trainer),
-            }))
-          ),
-        }
-      );
+      const response = await fetch('https://api.resend.com/emails/batch', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${RESEND_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(
+          chunk.map((trainer) => ({
+            from: FROM_EMAIL,
+            to: [trainer.email],
+            subject: 'Trainer Schedule Details',
+            html: buildScheduleHtml(trainer),
+          }))
+        ),
+      });
 
       const data = await response.json();
 
       if (!response.ok) {
         throw new Error(
-          data?.message ||
-          data?.error ||
-          'Failed to send schedule emails.'
+          data?.message || data?.error || 'Failed to send schedule emails.'
         );
       }
 

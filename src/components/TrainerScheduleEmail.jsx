@@ -15,13 +15,10 @@ const aliases = {
   hours: ['hours', 'hour'],
   costPerHour: ['costhrs', 'costperhour'],
   costPerDay: ['costday', 'costperday'],
-  foodLodging: [
-    'foodlodgingday',
-    'foodandlodgingday',
-  ],
-  travel: ['traveltofro', 'travelt oandfro'.replace(/\s/g, '')],
+  foodLodging: ['foodlodgingday', 'foodandlodgingday'],
+  travel: ['traveltofro', 'traveltoandfro'],
   totalAmount: ['totalamount'],
-  particular: ['particular'],
+  particular: ['particular', 'particulars'],
   total: ['total'],
 };
 
@@ -34,17 +31,9 @@ function getColumnMap(row) {
   }
 
   // Trainer Name and the core schedule fields identify a table header.
-  const required = [
-    'trainerName',
-    'domain',
-    'date',
-    'batch',
-    'time',
-  ];
+  const required = ['trainerName', 'domain', 'date', 'batch', 'time'];
 
-  return required.every((field) => map[field] !== -1)
-    ? map
-    : null;
+  return required.every((field) => map[field] !== -1) ? map : null;
 }
 
 function cell(row, map, field) {
@@ -59,7 +48,25 @@ function isBlankRow(row) {
 function extractTrainers(rows) {
   const grouped = new Map();
   let columns = null;
-  let currentTrainer = '';
+  let currentTrainer = ''; // reset on blank rows (used for schedule rows)
+  let lastTrainer = ''; // survives blank rows (used for summary rows)
+
+  const getTrainer = (name) => {
+    const key = normalize(name);
+
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        name,
+        domain: '',
+        costPerHour: '',
+        costPerDay: '',
+        rows: [], // schedule table
+        summary: [], // particular / total table
+      });
+    }
+
+    return grouped.get(key);
+  };
 
   for (const row of rows) {
     const detectedColumns = getColumnMap(row);
@@ -67,6 +74,7 @@ function extractTrainers(rows) {
     if (detectedColumns) {
       columns = detectedColumns;
       currentTrainer = '';
+      lastTrainer = '';
       continue;
     }
 
@@ -81,74 +89,55 @@ function extractTrainers(rows) {
 
     if (trainerCell) {
       currentTrainer = trainerCell;
+      lastTrainer = trainerCell;
     }
 
-    if (!currentTrainer) continue;
-
-    // Ignore rows that contain no schedule information.
     const date = cell(row, columns, 'date');
     const batch = cell(row, columns, 'batch');
     const time = cell(row, columns, 'time');
+    const particular = cell(row, columns, 'particular');
+    const total = cell(row, columns, 'total');
 
-    if (!date && !batch && !time) continue;
+    const hasSchedule = Boolean(date || batch || time);
+    const hasSummary = Boolean(particular || total);
 
-    const record = {
-      name: currentTrainer,
-      domain: cell(row, columns, 'domain'),
-      costPerHour: cell(row, columns, 'costPerHour'),
-      costPerDay: cell(row, columns, 'costPerDay'),
-      date,
-      batch,
-      time,
-      hours: cell(row, columns, 'hours'),
-      foodLodging: cell(row, columns, 'foodLodging'),
-      travel: cell(row, columns, 'travel'),
-      totalAmount: cell(row, columns, 'totalAmount'),
-      particular: cell(row, columns, 'particular'),
-      total: cell(row, columns, 'total'),
-    };
+    // Ignore rows that contain neither schedule nor summary information.
+    if (!hasSchedule && !hasSummary) continue;
 
-    const key = normalize(currentTrainer);
+    // Schedule rows need an active trainer. Summary rows may fall back to
+    // the last trainer seen in this table (e.g. after a blank row).
+    const owner = hasSchedule
+      ? currentTrainer
+      : currentTrainer || lastTrainer;
 
-    if (!grouped.has(key)) {
-      grouped.set(key, {
-        name: currentTrainer,
-        domain: '',
-        costPerHour: '',
-        costPerDay: '',
-        rows: [],
+    if (!owner) continue;
+
+    const trainer = getTrainer(owner);
+
+    // Preserve the first available shared detail.
+    for (const field of ['domain', 'costPerHour', 'costPerDay']) {
+      const value = cell(row, columns, field);
+      if (!trainer[field] && value) trainer[field] = value;
+    }
+
+    if (hasSchedule) {
+      trainer.rows.push({
+        date,
+        batch,
+        time,
+        hours: cell(row, columns, 'hours'),
+        foodLodging: cell(row, columns, 'foodLodging'),
+        travel: cell(row, columns, 'travel'),
+        totalAmount: cell(row, columns, 'totalAmount'),
       });
     }
 
-    const trainer = grouped.get(key);
-
-    // Preserve the first available shared detail.
-    for (const field of [
-      'domain',
-      'costPerHour',
-      'costPerDay',
-    ]) {
-      if (!trainer[field] && record[field]) {
-        trainer[field] = record[field];
-      }
+    if (hasSummary) {
+      trainer.summary.push({ particular, total });
     }
-
-    trainer.rows.push({
-      date: record.date,
-      batch: record.batch,
-      time: record.time,
-      hours: record.hours,
-      foodLodging: record.foodLodging,
-      travel: record.travel,
-      totalAmount: record.totalAmount,
-      particular: record.particular,
-      total: record.total,
-    });
   }
 
-  return [...grouped.values()].sort((a, b) =>
-    a.name.localeCompare(b.name)
-  );
+  return [...grouped.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 const buttonClass =
@@ -200,9 +189,7 @@ export default function TrainerScheduleEmail() {
 
     try {
       const data = await file.arrayBuffer();
-      const parsedWorkbook = XLSX.read(data, {
-        cellDates: true,
-      });
+      const parsedWorkbook = XLSX.read(data, { cellDates: true });
 
       setWorkbook(parsedWorkbook);
       setFileName(file.name);
@@ -253,9 +240,7 @@ export default function TrainerScheduleEmail() {
     const matches = firebaseTrainers.filter(
       (trainer) =>
         normalize(trainer.name) === normalize(name) &&
-        /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
-          trainer.email || ''
-        )
+        /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trainer.email || '')
     );
 
     return matches.length === 1 ? matches[0].email : '';
@@ -285,9 +270,9 @@ export default function TrainerScheduleEmail() {
 
     if (unresolved.length) {
       setMessage(
-        `Resolve missing or ambiguous Firebase email matches for: ${
-          unresolved.map((t) => t.name).join(', ')
-        }`
+        `Resolve missing or ambiguous Firebase email matches for: ${unresolved
+          .map((t) => t.name)
+          .join(', ')}`
       );
       return;
     }
@@ -296,33 +281,26 @@ export default function TrainerScheduleEmail() {
     setMessage('');
 
     try {
-      const response = await fetch(
-        '/api/send-trainer-schedule',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            trainers: chosen.map((trainer) => ({
-              ...trainer,
-              email: resolveEmail(trainer.name),
-            })),
-          }),
-        }
-      );
+      const response = await fetch('/api/send-trainer-schedule', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          trainers: chosen.map((trainer) => ({
+            ...trainer,
+            email: resolveEmail(trainer.name),
+          })),
+        }),
+      });
 
       const result = await response.json();
 
       if (!response.ok) {
-        throw new Error(
-          result.error || 'Unable to send emails.'
-        );
+        throw new Error(result.error || 'Unable to send emails.');
       }
 
-      setMessage(
-        `Email request accepted for ${result.count} trainers.`
-      );
+      setMessage(`Email request accepted for ${result.count} trainers.`);
     } catch (error) {
       console.error(error);
       setMessage(error.message || 'Email sending failed.');
@@ -338,8 +316,8 @@ export default function TrainerScheduleEmail() {
           Trainer Schedule Emails
         </h2>
         <p className="mt-1 text-sm text-gray-600">
-          Upload a schedule workbook, select its worksheet,
-          and email the selected trainers their schedules.
+          Upload a schedule workbook, select its worksheet, and email the
+          selected trainers their schedules.
         </p>
       </div>
 
@@ -355,9 +333,7 @@ export default function TrainerScheduleEmail() {
         </label>
 
         {fileName && (
-          <p className="text-sm text-gray-600">
-            File: {fileName}
-          </p>
+          <p className="text-sm text-gray-600">File: {fileName}</p>
         )}
 
         {workbook && (
@@ -365,9 +341,7 @@ export default function TrainerScheduleEmail() {
             Select worksheet
             <select
               value={sheetName}
-              onChange={(event) =>
-                handleSheetChange(event.target.value)
-              }
+              onChange={(event) => handleSheetChange(event.target.value)}
               className="mt-2 w-full rounded-lg border p-3"
             >
               <option value="">Choose a worksheet</option>
@@ -384,9 +358,7 @@ export default function TrainerScheduleEmail() {
       {trainers.length > 0 && (
         <section className="rounded-xl border bg-white p-5">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-            <h3 className="font-semibold">
-              Trainers ({trainers.length})
-            </h3>
+            <h3 className="font-semibold">Trainers ({trainers.length})</h3>
 
             <button
               type="button"
@@ -422,17 +394,19 @@ export default function TrainerScheduleEmail() {
                   />
 
                   <span className="min-w-0 flex-1">
-                    <span className="block font-medium">
-                      {trainer.name}
-                    </span>
+                    <span className="block font-medium">{trainer.name}</span>
                     <span className="block text-sm text-gray-500">
                       {trainer.domain || 'Domain not specified'}
                       {' · '}
                       {trainer.rows.length} schedule rows
+                      {' · '}
+                      {trainer.summary.length} summary rows
                     </span>
-                    <span className={`block text-xs ${
-                      email ? 'text-green-700' : 'text-red-600'
-                    }`}>
+                    <span
+                      className={`block text-xs ${
+                        email ? 'text-green-700' : 'text-red-600'
+                      }`}
+                    >
                       {email || 'Email missing or name match ambiguous'}
                     </span>
                   </span>
