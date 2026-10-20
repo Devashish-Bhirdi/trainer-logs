@@ -161,7 +161,7 @@ export default async function handler(req, res) {
     });
   }
 
-  const { trainers, college, paymentDays } = req.body || {};
+  const { trainers, college } = req.body || {};
 
   if (!Array.isArray(trainers) || trainers.length === 0) {
     return res.status(400).json({
@@ -178,11 +178,16 @@ export default async function handler(req, res) {
     });
   }
 
-  const days = Number(paymentDays);
+  const badDays = trainers.find((t) => {
+    const days = Number(t?.paymentDays);
+    return !Number.isInteger(days) || days <= 0;
+  });
 
-  if (!Number.isInteger(days) || days <= 0) {
+  if (badDays) {
     return res.status(400).json({
-      error: 'Payment cycle must be a whole number of days.',
+      error: `Payment cycle must be a whole number of days for ${
+        badDays?.name || 'each trainer'
+      }.`,
     });
   }
 
@@ -220,7 +225,11 @@ export default async function handler(req, res) {
             from: FROM_EMAIL,
             to: [trainer.email],
             subject: 'Trainer Schedule Details',
-            html: buildScheduleHtml(trainer, collegeInfo, days),
+            html: buildScheduleHtml(
+              trainer,
+              collegeInfo,
+              Number(trainer.paymentDays)
+            ),
           }))
         ),
       });

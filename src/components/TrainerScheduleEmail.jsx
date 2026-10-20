@@ -154,7 +154,7 @@ export default function TrainerScheduleEmail() {
   const [message, setMessage] = useState('');
   const [collegeName, setCollegeName] = useState('');
   const [venue, setVenue] = useState('');
-  const [paymentDays, setPaymentDays] = useState('');
+  const [paymentDays, setPaymentDays] = useState({});
 
   useEffect(() => {
     const loadTrainers = async () => {
@@ -272,10 +272,17 @@ export default function TrainerScheduleEmail() {
       return;
     }
 
-    const days = Number(paymentDays);
+    const missingDays = chosen.filter((trainer) => {
+      const days = Number(paymentDays[trainer.name]);
+      return !Number.isInteger(days) || days <= 0;
+    });
 
-    if (!Number.isInteger(days) || days <= 0) {
-      setMessage('Enter the payment cycle as a whole number of days.');
+    if (missingDays.length) {
+      setMessage(
+        `Enter the payment cycle (whole number of days) for: ${missingDays
+          .map((t) => t.name)
+          .join(', ')}`
+      );
       return;
     }
 
@@ -303,10 +310,10 @@ export default function TrainerScheduleEmail() {
         },
         body: JSON.stringify({
           college: { name: collegeName.trim(), venue: venue.trim() },
-          paymentDays: days,
           trainers: chosen.map((trainer) => ({
             ...trainer,
             email: resolveEmail(trainer.name),
+            paymentDays: Number(paymentDays[trainer.name]),
           })),
         }),
       });
@@ -396,19 +403,6 @@ export default function TrainerScheduleEmail() {
             className="mt-2 w-full rounded-lg border p-3"
           />
         </label>
-
-        <label className="block text-sm font-medium">
-          Payment cycle (days after invoice)
-          <input
-            type="number"
-            min="1"
-            step="1"
-            value={paymentDays}
-            onChange={(event) => setPaymentDays(event.target.value)}
-            placeholder="30"
-            className="mt-2 w-full rounded-lg border p-3"
-          />
-        </label>
       </section>
 
       {trainers.length > 0 && (
@@ -438,10 +432,11 @@ export default function TrainerScheduleEmail() {
               const email = resolveEmail(trainer.name);
 
               return (
-                <label
+                <div
                   key={trainer.name}
-                  className="flex items-start gap-3 rounded-lg border p-3"
+                  className="flex flex-wrap items-start gap-3 rounded-lg border p-3"
                 >
+                  <label className="flex min-w-0 flex-1 items-start gap-3">
                   <input
                     type="checkbox"
                     checked={selected.includes(trainer.name)}
@@ -466,7 +461,26 @@ export default function TrainerScheduleEmail() {
                       {email || 'Email missing or name match ambiguous'}
                     </span>
                   </span>
-                </label>
+                  </label>
+
+                  <label className="w-40 text-xs font-medium text-gray-600">
+                    Payment cycle (days)
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={paymentDays[trainer.name] ?? ''}
+                      onChange={(event) =>
+                        setPaymentDays((previous) => ({
+                          ...previous,
+                          [trainer.name]: event.target.value,
+                        }))
+                      }
+                      placeholder="30"
+                      className="mt-1 w-full rounded-lg border p-2 text-sm"
+                    />
+                  </label>
+                </div>
               );
             })}
           </div>
