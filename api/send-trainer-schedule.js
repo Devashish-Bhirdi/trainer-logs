@@ -2,7 +2,7 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY;
 
 const FROM_EMAIL =
   process.env.RESEND_FROM_EMAIL ||
-  'Gryphon Academy <devashish.bhirdi@gmail.com>';
+  'Gryphon Academy <reminders@gryphonacademy.co.in>';
 
 const escapeHtml = (value) =>
   String(value ?? '')
