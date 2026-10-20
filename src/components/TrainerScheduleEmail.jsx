@@ -152,6 +152,9 @@ export default function TrainerScheduleEmail() {
   const [selected, setSelected] = useState([]);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
+  const [collegeName, setCollegeName] = useState('');
+  const [venue, setVenue] = useState('');
+  const [paymentDays, setPaymentDays] = useState('');
 
   useEffect(() => {
     const loadTrainers = async () => {
@@ -264,6 +267,18 @@ export default function TrainerScheduleEmail() {
       return;
     }
 
+    if (!collegeName.trim() || !venue.trim()) {
+      setMessage('Enter the college name and venue.');
+      return;
+    }
+
+    const days = Number(paymentDays);
+
+    if (!Number.isInteger(days) || days <= 0) {
+      setMessage('Enter the payment cycle as a whole number of days.');
+      return;
+    }
+
     const unresolved = chosen.filter(
       (trainer) => !resolveEmail(trainer.name)
     );
@@ -287,6 +302,8 @@ export default function TrainerScheduleEmail() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          college: { name: collegeName.trim(), venue: venue.trim() },
+          paymentDays: days,
           trainers: chosen.map((trainer) => ({
             ...trainer,
             email: resolveEmail(trainer.name),
@@ -353,6 +370,45 @@ export default function TrainerScheduleEmail() {
             </select>
           </label>
         )}
+      </section>
+
+      <section className="rounded-xl border bg-white p-5 space-y-4">
+        <h3 className="font-semibold">Assignment details</h3>
+
+        <label className="block text-sm font-medium">
+          College name
+          <input
+            type="text"
+            value={collegeName}
+            onChange={(event) => setCollegeName(event.target.value)}
+            placeholder="ABC Institute of Technology"
+            className="mt-2 w-full rounded-lg border p-3"
+          />
+        </label>
+
+        <label className="block text-sm font-medium">
+          Venue
+          <input
+            type="text"
+            value={venue}
+            onChange={(event) => setVenue(event.target.value)}
+            placeholder="Main Auditorium, Pune Campus"
+            className="mt-2 w-full rounded-lg border p-3"
+          />
+        </label>
+
+        <label className="block text-sm font-medium">
+          Payment cycle (days after invoice)
+          <input
+            type="number"
+            min="1"
+            step="1"
+            value={paymentDays}
+            onChange={(event) => setPaymentDays(event.target.value)}
+            placeholder="30"
+            className="mt-2 w-full rounded-lg border p-3"
+          />
+        </label>
       </section>
 
       {trainers.length > 0 && (
