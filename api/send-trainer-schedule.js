@@ -12,44 +12,107 @@ const escapeHtml = (value) =>
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
 
+/* ---------- Inline styles (email clients ignore most CSS classes) ---------- */
+
+const S = {
+  wrap: 'font-family:Arial,sans-serif;color:#1f2937;font-size:14px;line-height:1.55;max-width:680px;margin:0 auto;',
+  p: 'margin:0 0 10px;',
+  box: 'background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:16px;margin:0 0 16px;',
+  label:
+    'margin:0 0 8px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#1e3a8a;font-weight:700;',
+  note: 'background:#fffbeb;border-left:4px solid #f59e0b;padding:10px 14px;border-radius:4px;margin:0 0 16px;',
+  table:
+    'border-collapse:collapse;width:100%;font-size:12px;',
+  th: 'background:#1e3a8a;color:#ffffff;text-align:left;padding:8px;font-weight:600;',
+  td: 'padding:8px;border-bottom:1px solid #e5e7eb;',
+  kvLabel: 'padding:6px 0;vertical-align:top;color:#6b7280;width:36%;',
+  kvValue: 'padding:6px 0;vertical-align:top;font-weight:600;',
+};
+
+/* ---------- Content blocks ---------- */
+
+const EXPECTATIONS = [
+  ['Topics to be covered', 'Please confirm the topics for this program.'],
+  [
+    'Training materials',
+    'Create engaging, interactive materials such as presentations, handouts, case studies and exercises that encourage active participation from the attendees.',
+  ],
+  [
+    'Training methodology',
+    'We follow a blended learning approach: lectures, discussions, group activities and multimedia resources. Please align the methodology with the desired learning outcomes.',
+  ],
+  [
+    'Evaluation and feedback',
+    "Conduct assessments at the end of the program to gauge the participants' understanding and the effectiveness of the training. Participant feedback will also be collected.",
+  ],
+  [
+    'Reporting',
+    'As a freelance trainer, please share periodic progress reports covering topics covered, feedback received, attendance and any adjustments made to the program.',
+  ],
+  [
+    'SOP',
+    'Please follow the SOP: the PPT template, Evaluation Report and invoice template. Evaluations must be completed before raising the invoice.',
+  ],
+];
+
+const NOTES = [
+  'Complete the total hours as per the contract.',
+  'Maintain the evaluation / assessment sheet.',
+  'Use the PPT template provided by Gryphon Academy.',
+];
+
+function buildKeyValue(pairs) {
+  const body = pairs
+    .map(
+      ([k, v]) => `
+      <tr>
+        <td style="${S.kvLabel}">${escapeHtml(k)}</td>
+        <td style="${S.kvValue}">${escapeHtml(v)}</td>
+      </tr>`
+    )
+    .join('');
+
+  return `<table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;width:100%;">${body}</table>`;
+}
+
 function buildScheduleTable(rows) {
   if (!rows.length) return '';
+
+  const headers = [
+    'Date',
+    'Batch',
+    'Time',
+    'Hours',
+    'Food + Lodging/Day',
+    'Travel To & Fro',
+    'Total Amount',
+  ];
+
+  const head = headers
+    .map((h) => `<th style="${S.th}">${escapeHtml(h)}</th>`)
+    .join('');
 
   const body = rows
     .map(
       (r) => `
-    <tr>
-      <td>${escapeHtml(r.date)}</td>
-      <td>${escapeHtml(r.batch)}</td>
-      <td>${escapeHtml(r.time)}</td>
-      <td>${escapeHtml(r.hours)}</td>
-      <td>${escapeHtml(r.foodLodging)}</td>
-      <td>${escapeHtml(r.travel)}</td>
-      <td>${escapeHtml(r.totalAmount)}</td>
-    </tr>
-  `
+      <tr>
+        <td style="${S.td}">${escapeHtml(r.date)}</td>
+        <td style="${S.td}">${escapeHtml(r.batch)}</td>
+        <td style="${S.td}">${escapeHtml(r.time)}</td>
+        <td style="${S.td}">${escapeHtml(r.hours)}</td>
+        <td style="${S.td}">${escapeHtml(r.foodLodging)}</td>
+        <td style="${S.td}">${escapeHtml(r.travel)}</td>
+        <td style="${S.td}">${escapeHtml(r.totalAmount)}</td>
+      </tr>`
     )
     .join('');
 
   return `
-    <h3 style="margin:24px 0 8px">Schedule</h3>
-    <table cellpadding="8" cellspacing="0" border="1"
-      style="border-collapse:collapse;width:100%;
-      font-size:12px;border-color:#d1d5db">
-      <thead style="background:#1e3a8a;color:white">
-        <tr>
-          <th>Date</th>
-          <th>Batch</th>
-          <th>Time</th>
-          <th>Hour</th>
-          <th>Food + Lodging/Day</th>
-          <th>Travel To &amp; Fro</th>
-          <th>Total Amount</th>
-        </tr>
-      </thead>
+    <p style="${S.label}">Schedule</p>
+    <table cellpadding="0" cellspacing="0" border="0" style="${S.table}">
+      <thead><tr>${head}</tr></thead>
       <tbody>${body}</tbody>
-    </table>
-  `;
+    </table>`;
 }
 
 function buildSummaryTable(summary) {
@@ -58,77 +121,84 @@ function buildSummaryTable(summary) {
   const body = summary
     .map(
       (s) => `
-    <tr>
-      <td>${escapeHtml(s.particular)}</td>
-      <td>${escapeHtml(s.total)}</td>
-    </tr>
-  `
+      <tr>
+        <td style="${S.td}">${escapeHtml(s.particular)}</td>
+        <td style="${S.td}">${escapeHtml(s.total)}</td>
+      </tr>`
     )
     .join('');
 
   return `
-    <h3 style="margin:24px 0 8px">Summary</h3>
-    <table cellpadding="8" cellspacing="0" border="1"
-      style="border-collapse:collapse;width:100%;
-      font-size:12px;border-color:#d1d5db">
-      <thead style="background:#1e3a8a;color:white">
+    <p style="${S.label}margin-top:18px;">Summary</p>
+    <table cellpadding="0" cellspacing="0" border="0" style="${S.table}">
+      <thead>
         <tr>
-          <th style="text-align:left">Particular</th>
-          <th style="text-align:left">Total</th>
+          <th style="${S.th}">Particular</th>
+          <th style="${S.th}">Total</th>
         </tr>
       </thead>
       <tbody>${body}</tbody>
-    </table>
-  `;
+    </table>`;
 }
 
 function buildScheduleHtml(trainer, college, paymentDays) {
   const rows = Array.isArray(trainer.rows) ? trainer.rows : [];
   const summary = Array.isArray(trainer.summary) ? trainer.summary : [];
-
   const year = new Date().getFullYear();
-  const paymentCycle = `${paymentDays} days from the date of invoice`;
+
+  const details = buildKeyValue([
+    ['College', college.name],
+    ['Address', college.address],
+    ['Trainer', trainer.name],
+    ['Domain', trainer.domain],
+    ['Cost / hour', trainer.costPerHour],
+    ['Cost / day', trainer.costPerDay],
+  ]);
+
+  const expectations = EXPECTATIONS.map(
+    ([title, text], i) =>
+      `<p style="${S.p}"><strong>${i + 1}. ${escapeHtml(title)}.</strong> ${escapeHtml(text)}</p>`
+  ).join('');
+
+  const notes = NOTES.map((n) => `<li>${escapeHtml(n)}</li>`).join('');
 
   return `
-    <div style="font-family:Arial,sans-serif;color:#1f2937">
-      <h5>Please talk about Gryphon when you start the session and incorporate the 1st and last in your PPT</h5>
+    <div style="${S.wrap}">
+      <div style="${S.note}">
+        Please talk about Gryphon when you start the session, and include the first and last slides of our PPT.
+      </div>
 
-      <p>Dear Sir,<br/>
-      I hope this email finds you well. I am writing to provide you with the details of an upcoming assignment with Gryphon Academy</p>
+      <p style="${S.p}">Dear Sir,</p>
+      <p style="${S.p}">I hope this email finds you well. I am writing with the details of an upcoming assignment with Gryphon Academy: a training program on <strong>Interview Preparedness</strong>, to help our students perform well in the Placement season ${year}.</p>
 
-      <p>The assignment involves conducting a comprehensive training program on Interview Preparedness. The program aims to enhance the skills and knowledge of our Students in this area and enable them to perform effectively in the Placement season ${year}</p>
-      <p>Please find below the details:</p>
-      <p><strong>1. College Name:</strong> ${escapeHtml(college.name)}</p>
-      <p><strong>2. Venue:</strong> ${escapeHtml(college.venue)}</p>
-      <p><strong>3. Trainer Name:</strong>
-        ${escapeHtml(trainer.name)}</p>
-      <p><strong>4. Domain:</strong>
-        ${escapeHtml(trainer.domain)}</p>
-      <p><strong>5. Cost/hour:</strong>
-        ${escapeHtml(trainer.costPerHour)}</p>
-      <p><strong>6. Cost/day:</strong>
-        ${escapeHtml(trainer.costPerDay)}</p>
-      <p><strong>7. Details of Schedule</strong></p>
-      ${buildScheduleTable(rows)}
-      <p><strong>8. Topics to be covered - Please confirm the same</strong></p>
-      <p><strong>9. Training Materials: We encourage you to create engaging and interactive training materials, including presentations, handouts, case studies, and exercises. These materials should effectively convey the key concepts and ensure active participation from the attendees.</strong></p>
-      <p><strong>10. Training Methodology: We believe in a blended learning approach, incorporating various training techniques such as lectures, discussions, group activities, and multimedia resources. Please ensure the training methodology aligns with the desired learning outcomes.</strong></p>
-      <p><strong>11. Evaluation and Feedback: At the end of the program, we expect you to conduct assessments or evaluations to gauge the participants' understanding and measure the effectiveness of the training. Feedback from participants will also be collected to help us continuously improve our training initiatives.</strong></p>
-      <p><strong> Reporting: As a freelancer trainer, we request you to provide periodic progress reports highlighting the topics covered, feedback received, Attendance, and any adjustments made to the training program. This will enable us to stay updated and ensure a smooth collaboration throughout the assignment.</strong></p>
-      <p><strong>12. Please go through the SOP and find some important points: PPT template, Evaluation Report, and invoice template need to be followed.</strong></p>
-      <p><strong>Evaluations are important before raising the invoice.</strong></p>
-      <p><strong>We would like to ask you to please confirm that you received this email and your commitment to the assignment. We look forward to working together and delivering an exceptional training experience.</strong></p>
-      <p><strong>13. Trainer would be abiding by the below payment cycle: ${escapeHtml(paymentCycle)}</strong></p>
-      ${buildSummaryTable(summary)}
+      <div style="${S.box}">
+        <p style="${S.label}">Assignment details</p>
+        ${details}
+      </div>
 
-      <p><strong>Please maintain the evaluation sheet/assessment sheet</strong></p>
-      <p><strong>*Note-</strong></p>
-      <p style="margin-left:12px">1. The trainer is requested to complete the total hours as per the contract</p>
-      <p style="margin-left:12px">2. Please maintain the evaluation sheet/assessment sheet.</p>
-      <p style="margin-left:12px">3. Use the PPT template given by Gryphon Academy.</p>
-      <p style="margin-top:24px">
-        Regards,
-      </p>
+      <div style="${S.box}">
+        <p style="${S.label}">Schedule &amp; summary</p>
+        ${buildScheduleTable(rows)}
+        ${buildSummaryTable(summary)}
+      </div>
+
+      <div style="${S.box}">
+        <p style="${S.label}">What we expect</p>
+        ${expectations}
+      </div>
+
+      <div style="${S.box}">
+        <p style="${S.label}">Payment</p>
+        <p style="margin:0;">Payment cycle: <strong>${escapeHtml(paymentDays)} days</strong> from the date of invoice.</p>
+      </div>
+
+      <div style="${S.box}">
+        <p style="${S.label}">Please note</p>
+        <ul style="margin:0;padding-left:18px;">${notes}</ul>
+      </div>
+
+      <p style="${S.p}">Kindly confirm receipt of this email and your commitment to the assignment. We look forward to working with you.</p>
+      <p style="margin:0;">Regards,<br/>Gryphon Academy</p>
     </div>
   `;
 }
@@ -140,41 +210,32 @@ const hasContent = (t) =>
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    'Content-Type, Authorization'
-  );
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
   if (req.method !== 'POST') {
-    return res.status(405).json({
-      error: 'Method not allowed',
-    });
+    return res.status(405).json({ error: 'Method not allowed' });
   }
 
   if (!RESEND_API_KEY) {
-    return res.status(500).json({
-      error: 'RESEND_API_KEY is not configured.',
-    });
+    return res.status(500).json({ error: 'RESEND_API_KEY is not configured.' });
   }
 
   const { trainers, college } = req.body || {};
 
   if (!Array.isArray(trainers) || trainers.length === 0) {
-    return res.status(400).json({
-      error: 'No trainers provided.',
-    });
+    return res.status(400).json({ error: 'No trainers provided.' });
   }
 
   const collegeName = String(college?.name ?? '').trim();
-  const collegeVenue = String(college?.venue ?? '').trim();
+  const collegeAddress = String(college?.address ?? '').trim();
 
-  if (!collegeName || !collegeVenue) {
+  if (!collegeName || !collegeAddress) {
     return res.status(400).json({
-      error: 'College name and venue are required.',
+      error: 'College name and address are required.',
     });
   }
 
@@ -205,7 +266,7 @@ export default async function handler(req, res) {
     });
   }
 
-  const collegeInfo = { name: collegeName, venue: collegeVenue };
+  const collegeInfo = { name: collegeName, address: collegeAddress };
 
   try {
     const results = [];

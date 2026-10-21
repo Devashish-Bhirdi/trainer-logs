@@ -22,6 +22,45 @@ const aliases = {
   total: ['total'],
 };
 
+// Labels that sit in one cell with the value in the next cell of the same row.
+const collegeLabels = {
+  name: ['collegename', 'college'],
+  address: ['address', 'collegeaddress'],
+};
+
+/**
+ * Finds "College Name" / "Address" labels anywhere in the sheet and returns
+ * the value from the cell immediately to the right of the label.
+ */
+function extractCollege(rows) {
+  const result = { name: '', address: '' };
+
+  for (const row of rows) {
+    for (let i = 0; i < row.length - 1; i++) {
+      const label = normalize(row[i]);
+      if (!label) continue;
+
+      for (const [field, names] of Object.entries(collegeLabels)) {
+        if (!result[field] && names.includes(label)) {
+          const value = String(row[i + 1] ?? '').trim();
+          if (value) result[field] = value;
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+// True for a "College Name | value" or "Address | value" row, so it is not
+// mistaken for trainer data.
+function isCollegeRow(row) {
+  return row.some((value) => {
+    const label = normalize(value);
+    return Object.values(collegeLabels).some((names) => names.includes(label));
+  });
+}
+
 function getColumnMap(row) {
   const cells = row.map(normalize);
   const map = {};
@@ -82,6 +121,9 @@ function extractTrainers(rows) {
       currentTrainer = '';
       continue;
     }
+
+    // College Name / Address rows are sheet metadata, not trainer data.
+    if (isCollegeRow(row)) continue;
 
     if (!columns) continue;
 
@@ -152,8 +194,7 @@ export default function TrainerScheduleEmail() {
   const [selected, setSelected] = useState([]);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
-  const [collegeName, setCollegeName] = useState('');
-  const [venue, setVenue] = useState('');
+  const [college, setCollege] = useState({ name: '', address: '' });
   const [paymentDays, setPaymentDays] = useState({});
 
   useEffect(() => {
@@ -189,6 +230,7 @@ export default function TrainerScheduleEmail() {
     setTrainers([]);
     setSelected([]);
     setSheetName('');
+    setCollege({ name: '', address: '' });
 
     try {
       const data = await file.arrayBuffer();
@@ -211,6 +253,7 @@ export default function TrainerScheduleEmail() {
 
     if (!workbook || !name) {
       setTrainers([]);
+      setCollege({ name: '', address: '' });
       return;
     }
 
@@ -224,17 +267,33 @@ export default function TrainerScheduleEmail() {
         dateNF: 'dd-mmm-yyyy',
       });
 
+      const extractedCollege = extractCollege(rows);
       const extracted = extractTrainers(rows);
+
+      setCollege(extractedCollege);
       setTrainers(extracted);
 
-      setMessage(
-        extracted.length
-          ? `Found ${extracted.length} trainers.`
-          : 'No trainer tables were detected. Check the selected worksheet and its headers.'
-      );
+      const warnings = [];
+      if (!extractedCollege.name) warnings.push('College Name');
+      if (!extractedCollege.address) warnings.push('Address');
+
+      if (!extracted.length) {
+        setMessage(
+          'No trainer tables were detected. Check the selected worksheet and its headers.'
+        );
+      } else if (warnings.length) {
+        setMessage(
+          `Found ${extracted.length} trainers, but could not find ${warnings.join(
+            ' and '
+          )} in the sheet. Add a "${warnings[0]}" label with its value in the next column.`
+        );
+      } else {
+        setMessage(`Found ${extracted.length} trainers.`);
+      }
     } catch (error) {
       console.error(error);
       setTrainers([]);
+      setCollege({ name: '', address: '' });
       setMessage('Unable to parse the selected worksheet.');
     }
   };
@@ -267,8 +326,10 @@ export default function TrainerScheduleEmail() {
       return;
     }
 
-    if (!collegeName.trim() || !venue.trim()) {
-      setMessage('Enter the college name and venue.');
+    if (!college.name || !college.address) {
+      setMessage(
+        'College Name and Address were not found in the selected worksheet.'
+      );
       return;
     }
 
@@ -309,7 +370,7 @@ export default function TrainerScheduleEmail() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          college: { name: collegeName.trim(), venue: venue.trim() },
+          college: { name: college.name, address: college.address },
           trainers: chosen.map((trainer) => ({
             ...trainer,
             email: resolveEmail(trainer.name),
@@ -379,31 +440,35 @@ export default function TrainerScheduleEmail() {
         )}
       </section>
 
-      <section className="rounded-xl border bg-white p-5 space-y-4">
-        <h3 className="font-semibold">Assignment details</h3>
+      {sheetName && (
+        <section className="rounded-xl border bg-white p-5 space-y-3">
+          <h3 className="font-semibold">Assignment details (from sheet)</h3>
 
-        <label className="block text-sm font-medium">
-          College name
-          <input
-            type="text"
-            value={collegeName}
-            onChange={(event) => setCollegeName(event.target.value)}
-            placeholder="ABC Institute of Technology"
-            className="mt-2 w-full rounded-lg border p-3"
-          />
-        </label>
+          <dl className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
+            <div>
+              <dt className="text-xs text-gray-500">College name</dt>
+              <dd
+                className={
+                  college.name ? 'font-medium' : 'font-medium text-red-600'
+                }
+              >
+                {college.name || 'Not found in sheet'}
+              </dd>
+            </div>
 
-        <label className="block text-sm font-medium">
-          Venue
-          <input
-            type="text"
-            value={venue}
-            onChange={(event) => setVenue(event.target.value)}
-            placeholder="Main Auditorium, Pune Campus"
-            className="mt-2 w-full rounded-lg border p-3"
-          />
-        </label>
-      </section>
+            <div>
+              <dt className="text-xs text-gray-500">Address</dt>
+              <dd
+                className={
+                  college.address ? 'font-medium' : 'font-medium text-red-600'
+                }
+              >
+                {college.address || 'Not found in sheet'}
+              </dd>
+            </div>
+          </dl>
+        </section>
+      )}
 
       {trainers.length > 0 && (
         <section className="rounded-xl border bg-white p-5">
@@ -437,30 +502,30 @@ export default function TrainerScheduleEmail() {
                   className="flex flex-wrap items-start gap-3 rounded-lg border p-3"
                 >
                   <label className="flex min-w-0 flex-1 items-start gap-3">
-                  <input
-                    type="checkbox"
-                    checked={selected.includes(trainer.name)}
-                    onChange={() => toggleTrainer(trainer.name)}
-                    className="mt-1"
-                  />
+                    <input
+                      type="checkbox"
+                      checked={selected.includes(trainer.name)}
+                      onChange={() => toggleTrainer(trainer.name)}
+                      className="mt-1"
+                    />
 
-                  <span className="min-w-0 flex-1">
-                    <span className="block font-medium">{trainer.name}</span>
-                    <span className="block text-sm text-gray-500">
-                      {trainer.domain || 'Domain not specified'}
-                      {' · '}
-                      {trainer.rows.length} schedule rows
-                      {' · '}
-                      {trainer.summary.length} summary rows
+                    <span className="min-w-0 flex-1">
+                      <span className="block font-medium">{trainer.name}</span>
+                      <span className="block text-sm text-gray-500">
+                        {trainer.domain || 'Domain not specified'}
+                        {' · '}
+                        {trainer.rows.length} schedule rows
+                        {' · '}
+                        {trainer.summary.length} summary rows
+                      </span>
+                      <span
+                        className={`block text-xs ${
+                          email ? 'text-green-700' : 'text-red-600'
+                        }`}
+                      >
+                        {email || 'Email missing or name match ambiguous'}
+                      </span>
                     </span>
-                    <span
-                      className={`block text-xs ${
-                        email ? 'text-green-700' : 'text-red-600'
-                      }`}
-                    >
-                      {email || 'Email missing or name match ambiguous'}
-                    </span>
-                  </span>
                   </label>
 
                   <label className="w-40 text-xs font-medium text-gray-600">
@@ -488,7 +553,9 @@ export default function TrainerScheduleEmail() {
           <button
             type="button"
             onClick={sendEmails}
-            disabled={!selected.length || loading}
+            disabled={
+              !selected.length || loading || !college.name || !college.address
+            }
             className={`${buttonClass} mt-5 bg-blue-900 text-white`}
           >
             {loading ? 'Sending...' : `Send emails (${selected.length})`}
