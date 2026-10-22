@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { collection, getDocs, query, where } from 'firebase/firestore';
 import { db } from '../services/firebase';
+import { buildScheduleHtml } from '../utils/trainerEmailTemplate';
 
 const normalize = (value) =>
   String(value ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -22,18 +23,38 @@ const aliases = {
   total: ['total'],
 };
 
-// Labels that sit in one cell with the value in the next cell of the same row.
+// Labels (already normalized) that sit in one cell with the value in the
+// next cell of the same row. "Project Code:" normalizes to "projectcode".
 const collegeLabels = {
   name: ['collegename', 'college'],
   address: ['address', 'collegeaddress'],
+  code: ['projectcode'],
 };
 
+const EMPTY_COLLEGE = { name: '', address: '', code: '' };
+
+const COLLEGE_FIELD_LABELS = {
+  name: 'College Name',
+  address: 'Address',
+  code: 'Project Code',
+};
+
+const SCHEDULE_FIELDS = [
+  ['date', 'Date'],
+  ['batch', 'Batch'],
+  ['time', 'Time'],
+  ['hours', 'Hours'],
+  ['foodLodging', 'Food + Lodging/Day'],
+  ['travel', 'Travel To & Fro'],
+  ['totalAmount', 'Total Amount'],
+];
+
 /**
- * Finds "College Name" / "Address" labels anywhere in the sheet and returns
- * the value from the cell immediately to the right of the label.
+ * Finds "College Name" / "Address" / "Project Code" labels anywhere in the
+ * sheet and returns the value from the cell immediately to the right.
  */
 function extractCollege(rows) {
-  const result = { name: '', address: '' };
+  const result = { ...EMPTY_COLLEGE };
 
   for (const row of rows) {
     for (let i = 0; i < row.length - 1; i++) {
@@ -52,8 +73,8 @@ function extractCollege(rows) {
   return result;
 }
 
-// True for a "College Name | value" or "Address | value" row, so it is not
-// mistaken for trainer data.
+// True for a "College Name | value", "Address | value" or
+// "Project Code | value" row, so it is not mistaken for trainer data.
 function isCollegeRow(row) {
   return row.some((value) => {
     const label = normalize(value);
@@ -122,7 +143,7 @@ function extractTrainers(rows) {
       continue;
     }
 
-    // College Name / Address rows are sheet metadata, not trainer data.
+    // College Name / Address / Project Code rows are sheet metadata.
     if (isCollegeRow(row)) continue;
 
     if (!columns) continue;
@@ -185,16 +206,269 @@ function extractTrainers(rows) {
 const buttonClass =
   'rounded-lg px-4 py-2.5 text-sm font-semibold disabled:opacity-50';
 
+const cellInput = 'w-full min-w-[80px] rounded border p-1 text-xs';
+
+/* ---------- Collapsible preview + editor for one trainer ---------- */
+
+function TrainerPreview({
+  trainer, // effective trainer (edited draft, or the parsed original)
+  isEdited,
+  college,
+  paymentDays,
+  email,
+  onChange, // (updater) => void, where updater receives a cloned trainer
+  onReset,
+}) {
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+
+  const html = buildScheduleHtml(trainer, college, paymentDays || '___');
+
+  const srcDoc = `<!doctype html><html><body style="margin:12px;background:#ffffff;">${html}</body></html>`;
+
+  const setField = (field, value) =>
+    onChange((t) => {
+      t[field] = value;
+    });
+
+  const setRowField = (index, field, value) =>
+    onChange((t) => {
+      t.rows[index][field] = value;
+    });
+
+  const setSummaryField = (index, field, value) =>
+    onChange((t) => {
+      t.summary[index][field] = value;
+    });
+
+  return (
+    <div className="rounded-lg border">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+        aria-expanded={open}
+      >
+        <span className="min-w-0">
+          <span className="block font-medium">{trainer.name}</span>
+          <span className="block truncate text-xs text-gray-500">
+            {email || 'No email resolved'}
+            {isEdited && (
+              <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-amber-800">
+                Edited
+              </span>
+            )}
+          </span>
+        </span>
+        <span className="text-sm text-blue-800">
+          {open ? 'Hide preview ▲' : 'Show preview ▼'}
+        </span>
+      </button>
+
+      {open && (
+        <div className="space-y-4 border-t p-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setEditing((v) => !v)}
+              className="rounded-lg border border-blue-900 px-3 py-1.5 text-sm font-medium text-blue-900"
+            >
+              {editing ? 'Done editing' : 'Modify mail'}
+            </button>
+
+            {isEdited && (
+              <button
+                type="button"
+                onClick={onReset}
+                className="text-sm text-red-600"
+              >
+                Reset to sheet values
+              </button>
+            )}
+          </div>
+
+          {editing && (
+            <div className="space-y-4 rounded-lg bg-gray-50 p-3">
+              <p className="text-xs text-gray-600">
+                Changes apply only to this trainer&apos;s email. College
+                name, address and project code are edited in the Assignment
+                details section above.
+              </p>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                {[
+                  ['domain', 'Domain'],
+                  ['costPerHour', 'Cost / hour'],
+                  ['costPerDay', 'Cost / day'],
+                ].map(([field, label]) => (
+                  <label
+                    key={field}
+                    className="text-xs font-medium text-gray-600"
+                  >
+                    {label}
+                    <input
+                      type="text"
+                      value={trainer[field] ?? ''}
+                      onChange={(e) => setField(field, e.target.value)}
+                      className="mt-1 w-full rounded border p-2 text-sm"
+                    />
+                  </label>
+                ))}
+              </div>
+
+              <div>
+                <p className="mb-2 text-xs font-semibold uppercase text-gray-600">
+                  Schedule rows
+                </p>
+                <div className="overflow-x-auto">
+                  <table className="w-full border-collapse text-xs">
+                    <thead>
+                      <tr>
+                        {SCHEDULE_FIELDS.map(([, label]) => (
+                          <th
+                            key={label}
+                            className="px-1 pb-1 text-left font-medium text-gray-500"
+                          >
+                            {label}
+                          </th>
+                        ))}
+                        <th />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {trainer.rows.map((row, index) => (
+                        <tr key={index}>
+                          {SCHEDULE_FIELDS.map(([field, label]) => (
+                            <td key={field} className="p-1">
+                              <input
+                                type="text"
+                                aria-label={`${label} row ${index + 1}`}
+                                value={row[field] ?? ''}
+                                onChange={(e) =>
+                                  setRowField(index, field, e.target.value)
+                                }
+                                className={cellInput}
+                              />
+                            </td>
+                          ))}
+                          <td className="p-1">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onChange((t) => {
+                                  t.rows.splice(index, 1);
+                                })
+                              }
+                              className="text-red-600"
+                              aria-label={`Remove schedule row ${index + 1}`}
+                            >
+                              ✕
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onChange((t) => {
+                      t.rows.push(
+                        Object.fromEntries(
+                          SCHEDULE_FIELDS.map(([field]) => [field, ''])
+                        )
+                      );
+                    })
+                  }
+                  className="mt-2 text-sm text-blue-800"
+                >
+                  + Add schedule row
+                </button>
+              </div>
+
+              <div>
+                <p className="mb-2 text-xs font-semibold uppercase text-gray-600">
+                  Summary rows
+                </p>
+                <div className="space-y-2">
+                  {trainer.summary.map((item, index) => (
+                    <div key={index} className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        aria-label={`Particular ${index + 1}`}
+                        placeholder="Particular"
+                        value={item.particular ?? ''}
+                        onChange={(e) =>
+                          setSummaryField(index, 'particular', e.target.value)
+                        }
+                        className={cellInput}
+                      />
+                      <input
+                        type="text"
+                        aria-label={`Total ${index + 1}`}
+                        placeholder="Total"
+                        value={item.total ?? ''}
+                        onChange={(e) =>
+                          setSummaryField(index, 'total', e.target.value)
+                        }
+                        className={cellInput}
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onChange((t) => {
+                            t.summary.splice(index, 1);
+                          })
+                        }
+                        className="text-red-600"
+                        aria-label={`Remove summary row ${index + 1}`}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onChange((t) => {
+                      t.summary.push({ particular: '', total: '' });
+                    })
+                  }
+                  className="mt-2 text-sm text-blue-800"
+                >
+                  + Add summary row
+                </button>
+              </div>
+            </div>
+          )}
+
+          <iframe
+            title={`Email preview for ${trainer.name}`}
+            srcDoc={srcDoc}
+            sandbox=""
+            className="h-[520px] w-full rounded-lg border bg-white"
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Main component ---------- */
+
 export default function TrainerScheduleEmail() {
   const [workbook, setWorkbook] = useState(null);
   const [fileName, setFileName] = useState('');
   const [sheetName, setSheetName] = useState('');
   const [trainers, setTrainers] = useState([]);
+  const [drafts, setDrafts] = useState({}); // trainer name -> edited copy
   const [firebaseTrainers, setFirebaseTrainers] = useState([]);
   const [selected, setSelected] = useState([]);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
-  const [college, setCollege] = useState({ name: '', address: '' });
+  const [college, setCollege] = useState(EMPTY_COLLEGE);
   const [paymentDays, setPaymentDays] = useState({});
 
   useEffect(() => {
@@ -228,9 +502,10 @@ export default function TrainerScheduleEmail() {
 
     setMessage('');
     setTrainers([]);
+    setDrafts({});
     setSelected([]);
     setSheetName('');
-    setCollege({ name: '', address: '' });
+    setCollege(EMPTY_COLLEGE);
 
     try {
       const data = await file.arrayBuffer();
@@ -249,11 +524,12 @@ export default function TrainerScheduleEmail() {
   const handleSheetChange = (name) => {
     setSheetName(name);
     setSelected([]);
+    setDrafts({});
     setMessage('');
 
     if (!workbook || !name) {
       setTrainers([]);
-      setCollege({ name: '', address: '' });
+      setCollege(EMPTY_COLLEGE);
       return;
     }
 
@@ -273,19 +549,19 @@ export default function TrainerScheduleEmail() {
       setCollege(extractedCollege);
       setTrainers(extracted);
 
-      const warnings = [];
-      if (!extractedCollege.name) warnings.push('College Name');
-      if (!extractedCollege.address) warnings.push('Address');
+      const missing = Object.entries(COLLEGE_FIELD_LABELS)
+        .filter(([field]) => !extractedCollege[field])
+        .map(([, label]) => label);
 
       if (!extracted.length) {
         setMessage(
           'No trainer tables were detected. Check the selected worksheet and its headers.'
         );
-      } else if (warnings.length) {
+      } else if (missing.length) {
         setMessage(
-          `Found ${extracted.length} trainers, but could not find ${warnings.join(
-            ' and '
-          )} in the sheet. Add a "${warnings[0]}" label with its value in the next column.`
+          `Found ${extracted.length} trainers, but could not find ${missing.join(
+            ', '
+          )} in the sheet. You can type the missing value(s) in the Assignment details section.`
         );
       } else {
         setMessage(`Found ${extracted.length} trainers.`);
@@ -293,7 +569,7 @@ export default function TrainerScheduleEmail() {
     } catch (error) {
       console.error(error);
       setTrainers([]);
-      setCollege({ name: '', address: '' });
+      setCollege(EMPTY_COLLEGE);
       setMessage('Unable to parse the selected worksheet.');
     }
   };
@@ -316,19 +592,50 @@ export default function TrainerScheduleEmail() {
     );
   };
 
+  // The edited draft if there is one, otherwise the parsed sheet data.
+  const effectiveTrainer = (trainer) => drafts[trainer.name] ?? trainer;
+
+  const updateDraft = (name, updater) => {
+    setDrafts((previous) => {
+      const original = trainers.find((t) => t.name === name);
+      const base = previous[name] ?? original;
+      if (!base) return previous;
+
+      const copy = JSON.parse(JSON.stringify(base));
+      updater(copy);
+
+      return { ...previous, [name]: copy };
+    });
+  };
+
+  const resetDraft = (name) => {
+    setDrafts((previous) => {
+      const next = { ...previous };
+      delete next[name];
+      return next;
+    });
+  };
+
+  const updateCollege = (field, value) =>
+    setCollege((previous) => ({ ...previous, [field]: value }));
+
+  const collegeComplete = Boolean(
+    college.name.trim() && college.address.trim() && college.code.trim()
+  );
+
   const sendEmails = async () => {
-    const chosen = trainers.filter((trainer) =>
-      selected.includes(trainer.name)
-    );
+    const chosen = trainers
+      .filter((trainer) => selected.includes(trainer.name))
+      .map(effectiveTrainer);
 
     if (!chosen.length) {
       setMessage('Select at least one trainer.');
       return;
     }
 
-    if (!college.name || !college.address) {
+    if (!collegeComplete) {
       setMessage(
-        'College Name and Address were not found in the selected worksheet.'
+        'College Name, Address and Project Code are all required. Fill the missing value(s) in Assignment details.'
       );
       return;
     }
@@ -360,6 +667,19 @@ export default function TrainerScheduleEmail() {
       return;
     }
 
+    const empty = chosen.filter(
+      (trainer) => !trainer.rows.length && !trainer.summary.length
+    );
+
+    if (empty.length) {
+      setMessage(
+        `No schedule or summary rows left for: ${empty
+          .map((t) => t.name)
+          .join(', ')}`
+      );
+      return;
+    }
+
     setLoading(true);
     setMessage('');
 
@@ -370,7 +690,11 @@ export default function TrainerScheduleEmail() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          college: { name: college.name, address: college.address },
+          college: {
+            name: college.name.trim(),
+            address: college.address.trim(),
+            code: college.code.trim(),
+          },
           trainers: chosen.map((trainer) => ({
             ...trainer,
             email: resolveEmail(trainer.name),
@@ -394,6 +718,10 @@ export default function TrainerScheduleEmail() {
     }
   };
 
+  const selectedTrainers = trainers.filter((t) =>
+    selected.includes(t.name)
+  );
+
   return (
     <div className="space-y-6">
       <div>
@@ -401,8 +729,8 @@ export default function TrainerScheduleEmail() {
           Trainer Schedule Emails
         </h2>
         <p className="mt-1 text-sm text-gray-600">
-          Upload a schedule workbook, select its worksheet, and email the
-          selected trainers their schedules.
+          Upload a schedule workbook, select its worksheet, preview or edit
+          each email, and send the selected trainers their schedules.
         </p>
       </div>
 
@@ -443,30 +771,32 @@ export default function TrainerScheduleEmail() {
       {sheetName && (
         <section className="rounded-xl border bg-white p-5 space-y-3">
           <h3 className="font-semibold">Assignment details (from sheet)</h3>
+          <p className="text-xs text-gray-500">
+            Read from the sheet. Edit any value here if it is wrong; it will
+            be used in every email.
+          </p>
 
-          <dl className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
-            <div>
-              <dt className="text-xs text-gray-500">College name</dt>
-              <dd
-                className={
-                  college.name ? 'font-medium' : 'font-medium text-red-600'
-                }
+          <div className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
+            {Object.entries(COLLEGE_FIELD_LABELS).map(([field, label]) => (
+              <label
+                key={field}
+                className={`text-xs text-gray-500 ${
+                  field === 'address' ? 'sm:col-span-2' : ''
+                }`}
               >
-                {college.name || 'Not found in sheet'}
-              </dd>
-            </div>
-
-            <div>
-              <dt className="text-xs text-gray-500">Address</dt>
-              <dd
-                className={
-                  college.address ? 'font-medium' : 'font-medium text-red-600'
-                }
-              >
-                {college.address || 'Not found in sheet'}
-              </dd>
-            </div>
-          </dl>
+                {label}
+                <input
+                  type="text"
+                  value={college[field]}
+                  onChange={(e) => updateCollege(field, e.target.value)}
+                  placeholder={`${label} not found in sheet`}
+                  className={`mt-1 w-full rounded-lg border p-2 text-sm font-medium text-gray-900 ${
+                    college[field].trim() ? '' : 'border-red-400'
+                  }`}
+                />
+              </label>
+            ))}
+          </div>
         </section>
       )}
 
@@ -550,12 +880,31 @@ export default function TrainerScheduleEmail() {
             })}
           </div>
 
+          {selectedTrainers.length > 0 && (
+            <div className="mt-6 space-y-3">
+              <h3 className="font-semibold">
+                Email previews ({selectedTrainers.length})
+              </h3>
+
+              {selectedTrainers.map((trainer) => (
+                <TrainerPreview
+                  key={trainer.name}
+                  trainer={effectiveTrainer(trainer)}
+                  isEdited={Boolean(drafts[trainer.name])}
+                  college={college}
+                  paymentDays={paymentDays[trainer.name]}
+                  email={resolveEmail(trainer.name)}
+                  onChange={(updater) => updateDraft(trainer.name, updater)}
+                  onReset={() => resetDraft(trainer.name)}
+                />
+              ))}
+            </div>
+          )}
+
           <button
             type="button"
             onClick={sendEmails}
-            disabled={
-              !selected.length || loading || !college.name || !college.address
-            }
+            disabled={!selected.length || loading || !collegeComplete}
             className={`${buttonClass} mt-5 bg-blue-900 text-white`}
           >
             {loading ? 'Sending...' : `Send emails (${selected.length})`}
