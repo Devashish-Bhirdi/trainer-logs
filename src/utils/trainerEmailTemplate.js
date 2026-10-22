@@ -2,8 +2,8 @@
 // so the preview is always identical to the email that gets sent.
 
 // Change these later when the real link is ready
-export const TRAINER_LOGS_LINK = 'https://trail.com';
-export const TRAINER_LOGS_LINK_TEXT = 'trail.com';
+export const TRAINER_LOGS_LINK = 'https://gryphonacademy.co.in/closure/';
+export const TRAINER_LOGS_LINK_TEXT = 'Trainer Logs';
 
 export const escapeHtml = (value) =>
   String(value ?? '')
