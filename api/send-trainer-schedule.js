@@ -15,7 +15,7 @@ const escapeHtml = (value) =>
 /* ---------- Inline styles (email clients ignore most CSS classes) ---------- */
 
 const S = {
-  wrap: 'font-family:Arial,sans-serif;color:#1f2937;font-size:14px;line-height:1.55;max-width:680px;margin:0 auto;',
+  wrap: 'font-family:Arial,sans-serif;color:#1f2937;font-size:14px;line-height:1.55;margin:0;text-align:left;',
   p: 'margin:0 0 10px;',
   box: 'background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:16px;margin:0 0 16px;',
   label:
