@@ -50,7 +50,7 @@ function App() {
   }
 
   return (
-    <BrowserRouter basename="/closure"> {/* Add BrowserRouter with basename here */}
+    <BrowserRouter> {/* Add BrowserRouter with basename here */}
       <div className="App">
         {!user ? (
           <Login />

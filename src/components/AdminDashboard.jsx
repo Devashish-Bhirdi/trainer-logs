@@ -1,11 +1,17 @@
 import { useState, useEffect } from 'react';
-import { collection, addDoc, getDocs, query, where, doc, setDoc, updateDoc, deleteDoc } from 'firebase/firestore';
+import { collection, addDoc, getDocs, query, where, doc, setDoc, updateDoc, deleteDoc,writeBatch, serverTimestamp, orderBy, deleteField } from 'firebase/firestore';
 import { initializeApp, getApps } from 'firebase/app';
 import { createUserWithEmailAndPassword, getAuth, sendPasswordResetEmail } from 'firebase/auth';
 import { auth, db, firebaseConfig } from '../services/firebase';
 import { useAuth } from '../hooks/useAuth';
 import EntryListForAdmin from './EntryListForAdmin';
 import ChangePasswordForm from './ChangePasswordForm';
+import Mapping from './Mapping';
+import CurriculumManager from './curriculumManager';
+import TrainerInvoice from './TrainerInvoice';
+import TrainerScheduleEmail from './TrainerScheduleEmail';
+import { sendTrainerRemindersViaResend, openOutlookMailto } from '../services/emailService';
+// import FixEntriesProject from './fixEntriesProject';
 
 const AdminDashboard = () => {
   const [activeTab, setActiveTab] = useState('entries');
@@ -20,18 +26,38 @@ const AdminDashboard = () => {
   const [projects, setProjects] = useState([]);
   const [campuses, setCampuses] = useState([]);
   const [batches, setBatches] = useState([]);
+  const [colleges, setColleges] = useState([]);
+  const [collegeId,setCollegeId] = useState('');
+  const [showAddCollege, setShowAddCollege] = useState(false);
+  const [newCollegeName,setNewCollegeName] = useState('');
+  const [allCampuses, setAllCampuses] = useState([]); // for the hierarchy view only
+  const [allBatches, setAllBatches] = useState([]);   // for the hierarchy view only
+  const [openBatchGroups, setOpenBatchGroups] = useState({}); // { campusId or 'nocampus-<projectId>': true } = expanded
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
+  const [statusConfirm,setStatusConfirm] = useState(null);
+  const [statusUpdating, setStatusUpdating] = useState(false);
   const { logout, currentUser } = useAuth();
 
 
   const [existingTrainers, setExistingTrainers] = useState([]);
   const [trainerSearchTerm, setTrainerSearchTerm] = useState('');
 
+  const [selectedTrainerIds, setSelectedTrainerIds] = useState([]);
+
+  // Resend Reminder Modal State
+  const [isReminderModalOpen, setIsReminderModalOpen] = useState(false);
+  const [reminderSubject, setReminderSubject] = useState('');
+  const [reminderCustomMessage, setReminderCustomMessage] = useState('');
+  const [sendingReminder, setSendingReminder] = useState(false);
+  const [reminderError, setReminderError] = useState('');
+
   // Load data from Firestore
   useEffect(() => {
     fetchProjects();
     fetchExistingTrainers();
+    fetchHierarchy();
+    fetchColleges();
   }, []);
 
   const fetchExistingTrainers = async () => {
@@ -161,6 +187,21 @@ const AdminDashboard = () => {
     }
   };
 
+  // Loads every campus and batch so the "Current Hierarchy" shows all projects at once
+  const fetchHierarchy = async () => {
+    try {
+      const [campusSnap, batchSnap] = await Promise.all([
+        getDocs(collection(db, 'campuses')),
+        getDocs(collection(db, 'batches')),
+      ]);
+      const byName = (a, b) => (a.name || '').toString().localeCompare((b.name || '').toString());
+      setAllCampuses(campusSnap.docs.map((d) => ({ id: d.id, ...d.data() })).sort(byName));
+      setAllBatches(batchSnap.docs.map((d) => ({ id: d.id, ...d.data() })).sort(byName));
+    } catch (error) {
+      console.error('Error fetching hierarchy:', error);
+    }
+  };
+
   const handleCreateTrainer = async (e) => {
     e.preventDefault();
     setLoading(true);
@@ -240,6 +281,40 @@ const AdminDashboard = () => {
     setTimeout(() => setMessage(''), 3000);
   };
 
+  const fetchColleges = async () => {
+    try{
+      const q = query(collection(db,'colleges'),orderBy('collegeName'));
+      const snap = await getDocs(q);
+      setColleges(snap.docs.map(d => ({id: d.id,...d.data()})));
+    } catch (error){
+      setMessage('Error loading colleges: ' + error.message);
+    }
+  };
+
+  const handleAddCollege = async () => {
+    const name = newCollegeName.trim();
+    if(!name) {
+      setMessage('Please enter a college name');
+      setTimeout(() => setMessage(''),3000);
+      return;
+    }
+    try{
+      const ref = await addDoc(collection(db,'colleges'),{
+        collegeName: name,
+        projects: {},
+        createdAt: new Date()
+      });
+      await fetchColleges();
+      setCollegeId(ref.id);
+      setNewCollegeName('');
+      setShowAddCollege(false);
+      setMessage(`College ${name} added`);
+    } catch (error) {
+      setMessage('Error adding college: ',error.message);
+    }
+    setTimeout(() => setMessage(''),3000);
+  };
+
   const handleCreateProject = async (e) => {
     e.preventDefault();
     if (!projectName) {
@@ -248,14 +323,34 @@ const AdminDashboard = () => {
       return;
     }
 
+    if(!collegeId) {
+      setMessage('Please choose a college');
+      setTimeout(() => setMessage(''),3000);
+      return;
+    }
+
     setLoading(true);
     try {
-      await addDoc(collection(db, 'projects'), {
+      const projectRef = doc(collection(db,'projects'));
+      const collegeRef = doc(db, 'colleges',collegeId);
+
+      const batch = writeBatch(db);
+      batch.set(projectRef,{
         name: projectName,
+        college: collegeId,
+        isActive: true,
         createdAt: new Date()
       });
+      
+      batch.update(collegeRef,{
+        [`projects.${projectRef.id}`]:projectName
+      });
+      await batch.commit();
+
       setMessage('Project created successfully!');
       setProjectName('');
+      setCollegeId('');
+      fetchColleges();
       fetchProjects(); // Refresh the list
     } catch (error) {
       setMessage('Error creating project: ' + error.message);
@@ -283,6 +378,7 @@ const AdminDashboard = () => {
       setMessage('Campus created successfully!');
       setCampusName('');
       fetchCampuses(selectedProject); // Refresh the list
+      fetchHierarchy();
     } catch (error) {
       setMessage('Error creating campus: ' + error.message);
     }
@@ -326,6 +422,7 @@ const AdminDashboard = () => {
       if (campusIdToUse) {
         fetchBatches(selectedProject, campusIdToUse); // Refresh the list
       }
+      fetchHierarchy();
     } catch (error) {
       setMessage('Error creating batch: ' + error.message);
     }
@@ -341,27 +438,45 @@ const AdminDashboard = () => {
     }
   };
 
-  // Edit and Delete handlers for projects, campuses and batches
+  // Edit and Delete handlers for projects; batches are delete-only; campuses are not editable
   const handleEditProject = async (project) => {
     const newName = window.prompt('Enter new project name', project.name);
     if (!newName || newName.trim() === '' || newName === project.name) return;
+    const trimmedName = newName.trim();
+
     setLoading(true);
     try {
-      await updateDoc(doc(db, 'projects', project.id), { name: newName });
-      // update projectName on campuses and batches
-      const qCamp = query(collection(db, 'campuses'), where('projectId', '==', project.id));
-      const camps = await getDocs(qCamp);
-      for (const c of camps.docs) {
-        await updateDoc(doc(db, 'campuses', c.id), { projectName: newName });
+      const batch = writeBatch(db);
+
+      batch.update(doc(db,'projects',project.id),{name: trimmedName});
+      
+      const camps = await getDocs(
+        query(collection(db,'campuses'),where('projectId','==',project.id))
+      );
+      camps.docs.forEach((c) => 
+        batch.update(doc(db,'campuses',c.id),{projectName: trimmedName})
+      );
+
+      const bs = await getDocs(
+        query(collection(db,'batches'),where('projectId','==',project.id))
+      );
+      bs.docs.forEach((b) => 
+        batch.update(doc(db,'batches',b.id),{projectName:trimmedName})
+      );
+
+      if(project.college){
+        batch.update(doc(db,'colleges',project.college),{
+          [`projects.${project.id}`]: trimmedName,
+        });
       }
-      const qBatch = query(collection(db, 'batches'), where('projectId', '==', project.id));
-      const bs = await getDocs(qBatch);
-      for (const b of bs.docs) {
-        await updateDoc(doc(db, 'batches', b.id), { projectName: newName });
-      }
+
+      await batch.commit();
+
       setMessage('Project renamed successfully');
       fetchProjects();
-      if (selectedProject === project.id) setSelectedProject(project.id); // trigger campus refetch
+      fetchHierarchy();
+      fetchColleges();
+      if(selectedProject === project.id) setSelectedProject(project.id);
     } catch (error) {
       setMessage('Error renaming project: ' + (error.message || error));
     }
@@ -370,26 +485,43 @@ const AdminDashboard = () => {
   };
 
   const handleDeleteProject = async (project) => {
-    const ok = window.confirm(`Delete project "${project.name}" and all its campuses and batches? This cannot be undone.`);
+    const ok = window.confirm(
+      `Delete project "${project.name}" and all its campuses and batches? This cannot be undone.`
+    );
     if (!ok) return;
+
     setLoading(true);
     try {
-      // delete batches under project
-      const qBatch = query(collection(db, 'batches'), where('projectId', '==', project.id));
-      const bs = await getDocs(qBatch);
-      for (const b of bs.docs) {
-        await deleteDoc(doc(db, 'batches', b.id));
+      const batch = writeBatch(db);
+
+      // 1. Batches under project
+      const bs = await getDocs(
+        query(collection(db, 'batches'), where('projectId', '==', project.id))
+      );
+      bs.docs.forEach((b) => batch.delete(doc(db, 'batches', b.id)));
+
+      // 2. Campuses under project
+      const camps = await getDocs(
+        query(collection(db, 'campuses'), where('projectId', '==', project.id))
+      );
+      camps.docs.forEach((c) => batch.delete(doc(db, 'campuses', c.id)));
+
+      // 3. Remove project entry from the college's projects map
+      if (project.college) {
+        batch.update(doc(db, 'colleges', project.college), {
+          [`projects.${project.id}`]: deleteField(),
+        });
       }
-      // delete campuses under project
-      const qCamp = query(collection(db, 'campuses'), where('projectId', '==', project.id));
-      const camps = await getDocs(qCamp);
-      for (const c of camps.docs) {
-        await deleteDoc(doc(db, 'campuses', c.id));
-      }
-      // delete project
-      await deleteDoc(doc(db, 'projects', project.id));
+
+      // 4. Project doc itself
+      batch.delete(doc(db, 'projects', project.id));
+
+      await batch.commit();
+
       setMessage('Project and its children deleted');
       fetchProjects();
+      fetchHierarchy();
+      fetchColleges(); // college's projects map changed
       setSelectedProject('');
       setCampuses([]);
       setBatches([]);
@@ -400,74 +532,19 @@ const AdminDashboard = () => {
     setTimeout(() => setMessage(''), 3000);
   };
 
-  const handleEditCampus = async (campus) => {
-    const newName = window.prompt('Enter new campus name', campus.name);
-    if (!newName || newName.trim() === '' || newName === campus.name) return;
-    setLoading(true);
-    try {
-      await updateDoc(doc(db, 'campuses', campus.id), { name: newName });
-      // update campusName on batches
-      const qBatch = query(collection(db, 'batches'), where('campusId', '==', campus.id));
-      const bs = await getDocs(qBatch);
-      for (const b of bs.docs) {
-        await updateDoc(doc(db, 'batches', b.id), { campusName: newName });
-      }
-      setMessage('Campus renamed successfully');
-      if (selectedProject) fetchCampuses(selectedProject);
-      if (selectedCampus === campus.id) setSelectedCampus(campus.id);
-    } catch (error) {
-      setMessage('Error renaming campus: ' + (error.message || error));
-    }
-    setLoading(false);
-    setTimeout(() => setMessage(''), 3000);
+  const toggleBatchGroup = (key) => {
+    setOpenBatchGroups((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const handleDeleteCampus = async (campus) => {
-    const ok = window.confirm(`Delete campus "${campus.name}" and all its batches? This cannot be undone.`);
-    if (!ok) return;
-    setLoading(true);
-    try {
-      // delete batches under campus
-      const qBatch = query(collection(db, 'batches'), where('campusId', '==', campus.id));
-      const bs = await getDocs(qBatch);
-      for (const b of bs.docs) {
-        await deleteDoc(doc(db, 'batches', b.id));
-      }
-      // delete campus
-      await deleteDoc(doc(db, 'campuses', campus.id));
-      setMessage('Campus and its batches deleted');
-      if (selectedProject) fetchCampuses(selectedProject);
-      setSelectedCampus('');
-      setBatches([]);
-    } catch (error) {
-      setMessage('Error deleting campus: ' + (error.message || error));
-    }
-    setLoading(false);
-    setTimeout(() => setMessage(''), 3000);
-  };
-
-  const handleEditBatch = async (batch) => {
-    const newName = window.prompt('Enter new batch name', batch.name);
-    if (!newName || newName.trim() === '' || newName === batch.name) return;
-    setLoading(true);
-    try {
-      await updateDoc(doc(db, 'batches', batch.id), { name: newName });
-      setMessage('Batch renamed successfully');
-      if (selectedProject && selectedCampus) fetchBatches(selectedProject, selectedCampus);
-    } catch (error) {
-      setMessage('Error renaming batch: ' + (error.message || error));
-    }
-    setLoading(false);
-    setTimeout(() => setMessage(''), 3000);
-  };
-
+  // Deletes ONLY the batch document. Entries, curriculum and everything else are left untouched.
   const handleDeleteBatch = async (batch) => {
-    const ok = window.confirm(`Delete batch "${batch.name}"? This cannot be undone.`);
+    const ok = window.confirm(`Delete batch "${batch.name}"? Existing entries are not affected. This cannot be undone.`);
     if (!ok) return;
     setLoading(true);
     try {
       await deleteDoc(doc(db, 'batches', batch.id));
       setMessage('Batch deleted');
+      fetchHierarchy();
       if (selectedProject && selectedCampus) fetchBatches(selectedProject, selectedCampus);
     } catch (error) {
       setMessage('Error deleting batch: ' + (error.message || error));
@@ -476,7 +553,26 @@ const AdminDashboard = () => {
     setTimeout(() => setMessage(''), 3000);
   };
 
-  // ...existing code...
+  const handleConfirmStatusChange = async () => {
+    if(!statusConfirm) return;
+    const {project, nextStatus} = statusConfirm;
+
+    setStatusUpdating(true);
+    try{
+      await updateDoc(doc(db,'projects',project.id),{isActive: nextStatus});
+      
+      setProjects((prev) => 
+        prev.map((p) => (p.id === project.id ? {...p,isActive:nextStatus} : p)) 
+      );
+      setMessage(`Project "${project.name}" is now ${nextStatus ? 'active' : 'inactive'}.`);
+    } catch (err) {
+      console.error(err);
+      setMessage('Error updating project status. Please try again.');
+    } finally {
+      setStatusUpdating(false);
+      setStatusConfirm(null);
+    }
+  }
 
   const handleSendPasswordReset = async (e) => {
     e && e.preventDefault && e.preventDefault();
@@ -495,6 +591,72 @@ const AdminDashboard = () => {
     }
     setLoading(false);
     setTimeout(() => setMessage(''), 3000);
+  };
+
+  const handleToggleTrainerSelection = (trainerId) => {
+    setSelectedTrainerIds(prev =>
+      prev.includes(trainerId) ? prev.filter(id => id !== trainerId) : [...prev, trainerId]
+    );
+  };
+
+  const handleSelectAllTrainers = (filteredTrainers) => {
+    const allIds = filteredTrainers.map(t => t.id || t.email);
+    const allSelected = allIds.every(id => selectedTrainerIds.includes(id));
+    if (allSelected) {
+      setSelectedTrainerIds(prev => prev.filter(id => !allIds.includes(id)));
+    } else {
+      setSelectedTrainerIds(prev => Array.from(new Set([...prev, ...allIds])));
+    }
+  };
+
+  const handleOpenReminderModal = (trainers) => {
+    const selected = trainers.filter(t => selectedTrainerIds.includes(t.id || t.email));
+    if (selected.length === 0) {
+      alert('Please select at least one trainer by checking the box next to their name.');
+      return;
+    }
+    const today = new Date();
+    const dateStr = today.toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' });
+    setReminderSubject(`Training Log Reminder – ${dateStr}`);
+    setReminderCustomMessage('');
+    setReminderError('');
+    setIsReminderModalOpen(true);
+  };
+
+  const handleSendReminderViaResend = async () => {
+    const selected = existingTrainers.filter(t => selectedTrainerIds.includes(t.id || t.email));
+    if (selected.length === 0) return;
+
+    setSendingReminder(true);
+    setReminderError('');
+
+    try {
+      const result = await sendTrainerRemindersViaResend({
+        trainers: selected,
+        subject: reminderSubject,
+        customMessage: reminderCustomMessage
+      });
+
+      setMessage(`✅ Reminder emails successfully sent to ${result.count || selected.length} trainer(s) via Resend!`);
+      setIsReminderModalOpen(false);
+      setSelectedTrainerIds([]);
+      setTimeout(() => setMessage(''), 6000);
+    } catch (err) {
+      console.error('Error sending reminder via Resend:', err);
+      setReminderError(err.message || 'Failed to send reminders.');
+    } finally {
+      setSendingReminder(false);
+    }
+  };
+
+  const handleSendReminderViaOutlook = () => {
+    const selected = existingTrainers.filter(t => selectedTrainerIds.includes(t.id || t.email));
+    openOutlookMailto({
+      trainers: selected,
+      subject: reminderSubject,
+      message: reminderCustomMessage
+    });
+    setIsReminderModalOpen(false);
   };
 
   return (
@@ -587,7 +749,7 @@ const AdminDashboard = () => {
               </svg>
               Manage Projects
             </button>
-            <button
+            {/* <button
               onClick={() => setActiveTab('changePassword')}
               className={`py-2 px-4 sm:py-3 sm:px-6 rounded-lg font-medium text-sm flex items-center transition-all duration-200 ${
                 activeTab === 'changePassword'
@@ -599,16 +761,112 @@ const AdminDashboard = () => {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
               </svg>
               Change Password
+            </button> */}
+            <button
+            onClick={() => setActiveTab('trainerMapping')}
+            className={`py-2 px-4 sm:py-3 sm:px-6 rounded-lg font-medium text-sm flex items-center transition-all duration-200 
+              ${
+                activeTab === 'trainerMapping'
+                ? 'bg-blue-100 text-blue-700 shadow-inner'
+                : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              <svg className={`w-5 h-5 mr-2 ${activeTab === 'trainerMapping' ? 'text-blue-600' : 'text-gray-400'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+              </svg>
+              Trainer Mapping
             </button>
+            <button
+            onClick={() => setActiveTab('curriculumManager')}
+            className={`py-2 px-4 sm:py-3 sm:px-6 rounded-lg font-medium text-sm flex items-center transition-all duration-200 
+              ${
+                activeTab === 'curriculumManager'
+                ? 'bg-blue-100 text-blue-700 shadow-inner'
+                : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              <svg className={`w-5 h-5 mr-2 ${activeTab === 'curriculumManager' ? 'text-blue-600' : 'text-gray-400'}`} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25zM6.75 12h.008v.008H6.75V12zm0 3h.008v.008H6.75V15zm0 3h.008v.008H6.75V18z"/>
+              </svg>
+              Curriculum Management
+            </button>
+            {/* <button
+            onClick={() => setActiveTab('shortList')}
+            className={`py-2 px-4 sm:py-3 sm:px-6 rounded-lg font-medium text-sm flex items-center transition-all duration-200 
+              ${
+                activeTab === 'shortList'
+                ? 'bg-blue-100 text-blue-700 shadow-inner'
+                : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              <svg className={`w-5 h-5 mr-2 ${activeTab === 'shortList' ? 'text-blue-600' : 'text-gray-400'}`} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M11.48 3.499a.562.562 0 011.04 0l2.125 5.111a.563.563 0 00.475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 00-.182.557l1.285 5.385a.562.562 0 01-.84.61l-4.725-2.885a.563.563 0 00-.586 0L6.982 20.54a.562.562 0 01-.84-.61l1.285-5.386a.562.562 0 00-.182-.557l-4.204-3.602a.563.563 0 01.321-.988l5.518-.442a.563.563 0 00.475-.345L11.48 3.5z" />
+              </svg>
+              Shortlist
+            </button> */}
+            <button
+            onClick={() => setActiveTab('trainerInvoice')}
+            className={`py-2 px-4 sm:py-3 sm:px-6 rounded-lg font-medium text-sm flex items-center transition-all duration-200 
+              ${
+                activeTab === 'trainerInvoice'
+                ? 'bg-blue-100 text-blue-700 shadow-inner'
+                : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              <svg className={`w-5 h-5 mr-2 ${activeTab === 'trainerInvoice' ? 'text-blue-600' : 'text-gray-400'}`} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M14.25 2.75H7.5A2.25 2.25 0 005.25 5v14a2.25 2.25 0 002.25 2.25h9A2.25 2.25 0 0018.75 19V7.25L14.25 2.75z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M14.25 2.75V6a1.25 1.25 0 001.25 1.25h3.25" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6M9 15.25h6M9 18.5h3" />
+              </svg>
+               Trainer Invoice
+            </button>
+            <button
+            onClick={() => setActiveTab('trainerEmail')}
+            className={`py-2 px-4 sm:py-3 sm:px-6 rounded-lg font-medium text-sm flex items-center transition-all duration-200 
+              ${
+                activeTab === 'trainerEmail'
+                ? 'bg-blue-100 text-blue-700 shadow-inner'
+                : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              <svg className={`w-5 h-5 mr-2 ${activeTab === 'trainerEmail' ? 'text-blue-600' : 'text-gray-400'}`} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M14.25 2.75H7.5A2.25 2.25 0 005.25 5v14a2.25 2.25 0 002.25 2.25h9A2.25 2.25 0 0018.75 19V7.25L14.25 2.75z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M14.25 2.75V6a1.25 1.25 0 001.25 1.25h3.25" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6M9 15.25h6M9 18.5h3" />
+              </svg>
+               Trainer Email
+            </button>
+            {/* <button
+            onClick={() => setActiveTab('fixentries')}
+            className={`py-2 px-4 sm:py-3 sm:px-6 rounded-lg font-medium text-sm flex items-center transition-all duration-200 
+              ${
+                activeTab === 'fixentries'
+                ? 'bg-blue-100 text-blue-700 shadow-inner'
+                : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+              }`}>
+                Fix Entries
+            </button> */}
           </nav>
         </div>
 
         {/* Tab Content */}
         <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6">
           {activeTab === 'entries' && <EntryListForAdmin />}
+
+          {activeTab === 'trainerMapping' && <Mapping/>}
+
+          {activeTab === 'curriculumManager' && <CurriculumManager/>}
           
-          {activeTab === 'changePassword' && <ChangePasswordForm />}
+          {/* {activeTab === 'changePassword' && <ChangePasswordForm />} */}
+
+          {activeTab === 'shortList' && <TalentShortlist/>}
+
+          {activeTab === 'trainerInvoice' && <TrainerInvoice/>}
+
+          {activeTab === 'trainerEmail' && <TrainerScheduleEmail/>}
           
+          {/* {activeTab === 'fixentries' && <FixEntriesProject/>} */}
+
           {activeTab === 'addTrainer' && (
             <div className="space-y-6">
               <h2 className="text-xl font-semibold text-gray-800 mb-2">Add New Trainer</h2>
@@ -710,19 +968,44 @@ const AdminDashboard = () => {
                   </h3>
 
                   {/* Search Bar */}
-                  <div className="relative w-full sm:w-72">
-                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                      <svg className="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                      </svg>
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
+                    {/* Search Bar */}
+                    <div className="relative w-full sm:w-72">
+                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                        <svg className="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                        </svg>
+                      </div>
+                      <input
+                        type="text"
+                        value={trainerSearchTerm}
+                        onChange={(e) => setTrainerSearchTerm(e.target.value)}
+                        placeholder="Search by name or email..."
+                        className="w-full pl-9 pr-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white transition-colors"
+                      />
                     </div>
-                    <input
-                      type="text"
-                      value={trainerSearchTerm}
-                      onChange={(e) => setTrainerSearchTerm(e.target.value)}
-                      placeholder="Search by name or email..."
-                      className="w-full pl-9 pr-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white transition-colors"
-                    />
+
+                    {/* Send Reminder Button */}
+                    <button
+                      id="send-reminder-btn"
+                      onClick={() => handleOpenReminderModal(existingTrainers)}
+                      title={selectedTrainerIds.length === 0 ? 'Select trainers below to send reminders' : `Send reminder to ${selectedTrainerIds.length} trainer(s)`}
+                      className={`flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-all duration-200 shadow-sm whitespace-nowrap ${
+                        selectedTrainerIds.length > 0
+                          ? 'bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white border-amber-500 hover:shadow-md cursor-pointer'
+                          : 'bg-white text-gray-400 border-gray-300 cursor-default opacity-60'
+                      }`}
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+                      </svg>
+                      Send Reminder
+                      {selectedTrainerIds.length > 0 && (
+                        <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-white text-orange-600 text-xs font-bold">
+                          {selectedTrainerIds.length}
+                        </span>
+                      )}
+                    </button>
                   </div>
                 </div>
 
@@ -764,6 +1047,16 @@ const AdminDashboard = () => {
                         <table className="min-w-full divide-y divide-gray-200">
                           <thead className="bg-gray-100">
                             <tr>
+                              <th className='px-4 py-3 text-left'>
+                                <input
+                                  id="select-all-trainers"
+                                  type='checkbox'
+                                  className='w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer'
+                                  checked={filteredTrainers.length > 0 && filteredTrainers.every(t => selectedTrainerIds.includes(t.id || t.email))}
+                                  onChange={() => handleSelectAllTrainers(filteredTrainers)}
+                                  title="Select all"
+                                />
+                              </th>
                               <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">#</th>
                               <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Trainer Name</th>
                               <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Trainer Email</th>
@@ -772,16 +1065,29 @@ const AdminDashboard = () => {
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-200">
-                            {filteredTrainers.map((trainer, index) => (
-                              <tr key={trainer.id || index} className="hover:bg-gray-50 transition-colors">
-                                <td className="px-4 py-3 text-sm text-gray-500">{index + 1}</td>
-                                <td className="px-4 py-3 text-sm font-medium text-gray-900 flex items-center space-x-2">
-                                  <span>{trainer.name || 'N/A'}</span>
-                                  {trainer.entryCount === 0 && (
-                                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300">
-                                      NEW
-                                    </span>
-                                  )}
+                            {filteredTrainers.map((trainer, index) => {
+                              const trainerId = trainer.id || trainer.email;
+                              const isChecked = selectedTrainerIds.includes(trainerId);
+                              return(
+                              <tr key={trainer.id || index} className={`transition-colors ${isChecked ? 'bg-amber-50' : 'hover:bg-gray-50 '}`}>
+                                <td className="px-4 py-3">
+                                  <input 
+                                    type='checkbox'
+                                    className='w-4 h-4 rounded border-gray-300 text-amber-500 focus:ring-amber-400 cursor-point'
+                                    checked={isChecked}
+                                    onChange={() => handleToggleTrainerSelection(trainerId)}
+                                  /> 
+                                </td>
+                                <td className='px-4 py-3 text-sm text-gray-500'>{index + 1}</td>
+                                <td className="px-4 py-3 text-sm font-medium text-gray-900">
+                                  <div className='flex items-center space-x-2'>
+                                    <span>{trainer.name || 'N/A'}</span>
+                                    {trainer.entryCount === 0 && (
+                                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300">
+                                        NEW
+                                      </span>
+                                    )}
+                                  </div>  
                                 </td>
                                 <td className="px-4 py-3 text-sm text-gray-600">{trainer.email || 'N/A'}</td>
                                 <td className="px-4 py-3 text-sm font-semibold text-blue-700">
@@ -800,7 +1106,8 @@ const AdminDashboard = () => {
                                   </button>
                                 </td>
                               </tr>
-                            ))}
+                              );
+                            })}
                           </tbody>
                         </table>
                       </div>
@@ -842,6 +1149,46 @@ const AdminDashboard = () => {
                         className="w-full p-2 sm:p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
                         required
                       />
+                    </div>
+                    <div>
+                      <div className='flex items-center justify-between mb-1'>
+                        <label className='block text-sm font-medium text-gray-700'> College Name</label>
+                        <button
+                          type="button"
+                          onClick={() => setShowAddCollege(!showAddCollege)}
+                          className='text-xs text-blue-600 hover:text-blue-800 font-medium'
+                        >
+                          {showAddCollege ? 'Cancel' : '+ Add new college'}
+                        </button>
+                      </div>
+
+                      {showAddCollege && (
+                        <div className='flex gap-2 mb-2'>
+                          <input 
+                            type='text'
+                            value={newCollegeName}
+                            onChange={(e) => setNewCollegeName(e.target.value)}
+                            placeholder='New college name'
+                            className='flex-1 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500'/>
+                          <button 
+                            type='button'
+                            onClick={handleAddCollege}
+                            className='px-3 py-2 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700'>
+                              Add
+                          </button>
+                        </div>
+                      )}
+                      <select
+                        value={collegeId}
+                        onChange={(e) => setCollegeId(e.target.value)}
+                        className='w-full p-2 sm:p-3 border border-gray-300 rounded-lg foucs:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors'
+                        required
+                      >
+                        <option value="">Select a college</option>
+                        {colleges.map((c) => (
+                          <option key={c.id} value={c.id}>{c.collegeName}</option>
+                        ))}
+                      </select>
                     </div>
                     <button
                       type="submit"
@@ -985,65 +1332,128 @@ const AdminDashboard = () => {
                   <div className="space-y-4">
                     {projects.map(project => (
                       <div key={project.id} className="border border-gray-200 rounded-lg p-4">
-                        <div className="flex items-center justify-between">
-                          <h4 className="font-medium text-gray-800 flex items-center">
-                            <svg className="w-4 h-4 mr-2 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
-                            </svg>
-                            {project.name}
-                          </h4>
-                          <div className="space-x-2">
-                            <button onClick={() => handleEditProject(project)} className="text-sm text-blue-600 hover:underline">Edit</button>
-                            <button onClick={() => handleDeleteProject(project)} className="text-sm text-red-600 hover:underline">Delete</button>
-                          </div>
-                        </div>
-                        
-                        <div className="mt-3 ml-6 space-y-3 border-l-2 border-blue-200 pl-4">
-                          {campuses.filter(c => c.projectId === project.id).length === 0 ? (
-                            <div className="text-gray-400 text-sm bg-gray-50 p-2 rounded">
-                              
+                        {(() => {
+                          const isActive = project.isActive !== false;
+                          return(
+                            <div className='flex items-center justify-between'>
+                              <h4 className='font-medium text-gray-800 flex items-center'>
+                                <svg className="w-4 h-4 mr-2 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                                </svg>
+                                {project.name}
+                                <span
+                                  className={`ml-3 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ${
+                                    isActive 
+                                      ? 'bg-green-50 text-green-700 border-green-200'
+                                      : 'bg-gray-100 text-gray-600 border-gray-300'
+                                  }`}>
+                                    {isActive ? 'Active' : 'Inactive'}
+                                </span>
+                              </h4>
+                              <div className="flex items-center space-x-3">
+                                <button
+                                  type='button'
+                                  role='switch'
+                                  aria-checked={isActive}
+                                  onClick={() => setStatusConfirm({project,nextStatus: !isActive})}
+                                  title={isActive ? 'Active - click to deactivate' : 'Inactive - click to activate'}
+                                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 ${
+                                    isActive ? 'bg-green-600 focus:ring-green-500' : 'bg-gray-300 focus:ring-gray-400'
+                                  }`}>
+                                <span
+                                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                    isActive ? 'translate-x-6': 'translate-x-1'
+                                  }`}/>  
+                                </button>
+                                <button onClick={() => handleEditProject(project)} className='text-sm text-blue-600 hover:underline'>Edit</button>
+                                <button onClick={() => handleDeleteProject(project)} className='text-sm text-red-600 hover:underline'>Delete</button>
+                              </div>
                             </div>
-                          ) : (
-                            campuses.filter(c => c.projectId === project.id).map(campus => (
+                          )
+                        })()}
+                        <div className="mt-3 ml-6 space-y-3 border-l-2 border-blue-200 pl-4">
+                          {/* Campuses: display only. Batches under each are collapsible and delete-only. */}
+                          {allCampuses.filter(c => c.projectId === project.id).map(campus => {
+                            const campusBatches = allBatches.filter(b => b.campusId === campus.id);
+                            const isOpen = !!openBatchGroups[campus.id];
+                            return (
                               <div key={campus.id} className="border-l-2 border-green-200 pl-3">
                                 <div className="flex items-center justify-between">
                                   <h5 className="font-medium text-gray-700 flex items-center">
                                     <svg className="w-4 h-4 mr-2 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
-                                    </svg>
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                                  </svg>
                                     {campus.name}
                                   </h5>
-                                  <div className="space-x-2">
-                                    <button onClick={() => handleEditCampus(campus)} className="text-sm text-blue-600 hover:underline">Edit</button>
-                                    <button onClick={() => handleDeleteCampus(campus)} className="text-sm text-red-600 hover:underline">Delete</button>
-                                  </div>
+                                  {campusBatches.length > 0 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleBatchGroup(campus.id)}
+                                      aria-expanded={isOpen}
+                                      className="flex items-center text-xs text-purple-700 hover:underline"
+                                    >
+                                      <svg className={`w-3.5 h-3.5 mr-1 transition-transform ${isOpen ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                    </svg>
+                                      {campusBatches.length} {campusBatches.length === 1 ? 'batch' : 'batches'}
+                                    </button>
+                                  )}
                                 </div>
-                                
-                                <div className="mt-2 ml-4 space-y-2 border-l-2 border-purple-200 pl-3">
-                                  {batches.filter(b => b.campusId === campus.id).length === 0 ? (
-                                    <div className="text-gray-400 text-sm bg-gray-50 p-2 rounded">
-                                      
-                                    </div>
-                                  ) : (
-                                    batches.filter(b => b.campusId === campus.id).map(batch => (
+
+                                {isOpen && (
+                                  <div className="mt-2 ml-4 space-y-2 border-l-2 border-purple-200 pl-3 max-h-60 overflow-y-auto">
+                                    {campusBatches.map(batch => (
                                       <div key={batch.id} className="text-gray-600 flex items-center justify-between">
                                         <div className="flex items-center">
                                           <svg className="w-4 h-4 mr-2 text-purple-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-                                          </svg>
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                                        </svg>
                                           {batch.name}
                                         </div>
-                                        <div className="space-x-2">
-                                          <button onClick={() => handleEditBatch(batch)} className="text-sm text-blue-600 hover:underline">Edit</button>
-                                          <button onClick={() => handleDeleteBatch(batch)} className="text-sm text-red-600 hover:underline">Delete</button>
-                                        </div>
+                                        <button onClick={() => handleDeleteBatch(batch)} className="text-sm text-red-600 hover:underline">Delete</button>
                                       </div>
-                                    ))
-                                  )}
-                                </div>
+                                    ))}
+                                  </div>
+                                )}
                               </div>
-                            ))
-                          )}
+                            );
+                          })}
+
+                          {/* Batches that belong to the project but have no campus */}
+                          {(() => {
+                            const noCampusBatches = allBatches.filter(b => b.projectId === project.id && !b.campusId);
+                            if (noCampusBatches.length === 0) return null;
+                            const key = `nocampus-${project.id}`;
+                            const isOpen = !!openBatchGroups[key];
+                            return (
+                              <div className="border-l-2 border-purple-200 pl-3">
+                                <div className="flex items-center justify-between">
+                                  <p className="text-xs text-gray-500">Batches without a campus</p>
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleBatchGroup(key)}
+                                    aria-expanded={isOpen}
+                                    className="flex items-center text-xs text-purple-700 hover:underline"
+                                  >
+                                    <svg className={`w-3.5 h-3.5 mr-1 transition-transform ${isOpen ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                    </svg>
+                                    {noCampusBatches.length} {noCampusBatches.length === 1 ? 'batch' : 'batches'}
+                                  </button>
+                                </div>
+                                {isOpen && (
+                                  <div className="mt-2 space-y-2 max-h-60 overflow-y-auto">
+                                    {noCampusBatches.map(batch => (
+                                      <div key={batch.id} className="text-gray-600 flex items-center justify-between">
+                                        <span>{batch.name}</span>
+                                        <button onClick={() => handleDeleteBatch(batch)} className="text-sm text-red-600 hover:underline">Delete</button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </div>
                       </div>
                     ))}
@@ -1054,7 +1464,199 @@ const AdminDashboard = () => {
           )}
         </div>
       </div>
-    </div>
+      {statusConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-semibold text-gray-800 mb-2">
+              {statusConfirm.nextStatus ? 'Activate project?' : 'Deactivate project?'}
+            </h3>
+            <p className="text-sm text-gray-600 mb-6">
+              Are you sure you want to mark{' '}
+              <span className="font-semibold">{statusConfirm.project.name}</span> as{' '}
+              <span className="font-semibold">{statusConfirm.nextStatus ? 'active' : 'inactive'}</span>?
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setStatusConfirm(null)}
+                disabled={statusUpdating}
+                className="px-4 py-2 text-sm rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmStatusChange}
+                disabled={statusUpdating}
+                className={`px-4 py-2 text-sm rounded-lg text-white disabled:opacity-50 ${
+                  statusConfirm.nextStatus ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'
+                }`}
+              >
+                {statusUpdating ? 'Updating...' : 'Yes, confirm'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+            {/* Reminder Email Modal */}
+      {isReminderModalOpen && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden border border-gray-200 animate-in fade-in zoom-in-95 duration-200">
+            {/* Modal Header */}
+            <div className="bg-gradient-to-r from-blue-700 via-indigo-700 to-blue-800 p-6 text-white flex items-center justify-between">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-full bg-white/20 backdrop-blur-md flex items-center justify-center">
+                  <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold">Send Training Log Reminder</h3>
+                  <p className="text-xs text-blue-200">Delivered directly via Resend email service</p>
+                </div>
+              </div>
+              <button
+                onClick={() => !sendingReminder && setIsReminderModalOpen(false)}
+                className="text-white/80 hover:text-white rounded-lg p-1.5 hover:bg-white/10 transition-colors"
+                disabled={sendingReminder}
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 space-y-4">
+              {/* Recipients summary */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                    Selected Trainers ({selectedTrainerIds.length})
+                  </label>
+                  <span className="text-xs text-blue-600 font-medium">Individual personalized emails</span>
+                </div>
+                <div className="max-h-28 overflow-y-auto p-2 bg-gray-50 rounded-lg border border-gray-200 space-y-1">
+                  {existingTrainers
+                    .filter(t => selectedTrainerIds.includes(t.id || t.email))
+                    .map((t, idx) => (
+                      <div key={t.id || idx} className="flex items-center justify-between text-xs py-1 px-2 bg-white rounded border border-gray-100 shadow-2xs">
+                        <span className="font-medium text-gray-800">{t.name || 'Unnamed Trainer'}</span>
+                        <span className="text-gray-500 font-mono">{t.email}</span>
+                      </div>
+                    ))}
+                </div>
+              </div>
+
+              {/* Subject */}
+              <div>
+                <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wider mb-1">
+                  Subject Line
+                </label>
+                <input
+                  type="text"
+                  value={reminderSubject}
+                  onChange={(e) => setReminderSubject(e.target.value)}
+                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  required
+                />
+              </div>
+
+              {/* Custom message */}
+              <div>
+                <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wider mb-1">
+                  Optional Note / Instructions
+                </label>
+                <textarea
+                  value={reminderCustomMessage}
+                  onChange={(e) => setReminderCustomMessage(e.target.value)}
+                  placeholder="e.g., Please ensure today's logs are submitted before 6:00 PM for reporting."
+                  rows={3}
+                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none"
+                />
+              </div>
+
+              {/* Sender Info Badge */}
+              <div className="flex items-center justify-between p-3 bg-blue-50/70 border border-blue-200/80 rounded-lg text-xs">
+                <div className="flex items-center space-x-2 text-blue-900">
+                  <svg className="w-4 h-4 text-blue-600 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                  </svg>
+                  <span>From: <strong>Gryphon Academy</strong> &lt;reminders@gryphonacademy.co.in&gt;</span>
+                </div>
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-2xs font-semibold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                  Resend Verified
+                </span>
+              </div>
+
+              {/* Error banner */}
+              {reminderError && (
+                <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700 flex flex-col gap-1">
+                  <div className="flex items-center">
+                    <svg className="w-4 h-4 mr-1.5 text-red-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <span className="font-semibold">Error sending email:</span>
+                  </div>
+                  <p className="ml-5 text-red-600">{reminderError}</p>
+                  <p className="ml-5 text-gray-500 mt-1">
+                    You can still use the <strong>Open in Outlook</strong> button below as a backup.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Actions */}
+            <div className="p-4 bg-gray-50 border-t border-gray-200 flex flex-col sm:flex-row items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={handleSendReminderViaOutlook}
+                disabled={sendingReminder}
+                title="Open default Outlook mail client with draft"
+                className="w-full sm:w-auto px-3 py-2 text-xs font-medium text-gray-700 bg-white hover:bg-gray-100 border border-gray-300 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+              >
+                <svg className="w-3.5 h-3.5 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                </svg>
+                Open in Outlook
+              </button>
+
+              <div className="flex items-center space-x-2 w-full sm:w-auto justify-end">
+                <button
+                  type="button"
+                  onClick={() => setIsReminderModalOpen(false)}
+                  disabled={sendingReminder}
+                  className="px-4 py-2 text-xs font-medium text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-200 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSendReminderViaResend}
+                  disabled={sendingReminder}
+                  className="px-5 py-2 text-xs font-semibold text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 rounded-lg shadow-sm hover:shadow transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
+                >
+                  {sendingReminder ? (
+                    <>
+                      <svg className="animate-spin h-3.5 w-3.5 text-white" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                      Sending via Resend...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                      </svg>
+                      Send via Resend ({selectedTrainerIds.length})
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>  
   );
 };
 
