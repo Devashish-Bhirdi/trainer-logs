@@ -49,10 +49,10 @@ const SCHEDULE_FIELDS = [
   ['totalAmount', 'Total Amount'],
 ];
 
-/**
- * Finds "College Name" / "Address" / "Project Code" labels anywhere in the
- * sheet and returns the value from the cell immediately to the right.
- */
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/* ---------- Excel parsing ---------- */
+
 function extractCollege(rows) {
   const result = { ...EMPTY_COLLEGE };
 
@@ -73,8 +73,6 @@ function extractCollege(rows) {
   return result;
 }
 
-// True for a "College Name | value", "Address | value" or
-// "Project Code | value" row, so it is not mistaken for trainer data.
 function isCollegeRow(row) {
   return row.some((value) => {
     const label = normalize(value);
@@ -90,7 +88,6 @@ function getColumnMap(row) {
     map[field] = cells.findIndex((cell) => names.includes(cell));
   }
 
-  // Trainer Name and the core schedule fields identify a table header.
   const required = ['trainerName', 'domain', 'date', 'batch', 'time'];
 
   return required.every((field) => map[field] !== -1) ? map : null;
@@ -108,8 +105,8 @@ function isBlankRow(row) {
 function extractTrainers(rows) {
   const grouped = new Map();
   let columns = null;
-  let currentTrainer = ''; // reset on blank rows (used for schedule rows)
-  let lastTrainer = ''; // survives blank rows (used for summary rows)
+  let currentTrainer = '';
+  let lastTrainer = '';
 
   const getTrainer = (name) => {
     const key = normalize(name);
@@ -120,8 +117,8 @@ function extractTrainers(rows) {
         domain: '',
         costPerHour: '',
         costPerDay: '',
-        rows: [], // schedule table
-        summary: [], // particular / total table
+        rows: [],
+        summary: [],
       });
     }
 
@@ -143,7 +140,6 @@ function extractTrainers(rows) {
       continue;
     }
 
-    // College Name / Address / Project Code rows are sheet metadata.
     if (isCollegeRow(row)) continue;
 
     if (!columns) continue;
@@ -164,11 +160,8 @@ function extractTrainers(rows) {
     const hasSchedule = Boolean(date || batch || time);
     const hasSummary = Boolean(particular || total);
 
-    // Ignore rows that contain neither schedule nor summary information.
     if (!hasSchedule && !hasSummary) continue;
 
-    // Schedule rows need an active trainer. Summary rows may fall back to
-    // the last trainer seen in this table (e.g. after a blank row).
     const owner = hasSchedule
       ? currentTrainer
       : currentTrainer || lastTrainer;
@@ -177,7 +170,6 @@ function extractTrainers(rows) {
 
     const trainer = getTrainer(owner);
 
-    // Preserve the first available shared detail.
     for (const field of ['domain', 'costPerHour', 'costPerDay']) {
       const value = cell(row, columns, field);
       if (!trainer[field] && value) trainer[field] = value;
@@ -203,29 +195,28 @@ function extractTrainers(rows) {
   return [...grouped.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-const buttonClass =
-  'rounded-lg px-4 py-2.5 text-sm font-semibold disabled:opacity-50';
+/* ---------- Small UI pieces ---------- */
 
-const cellInput = 'w-full min-w-[80px] rounded border p-1 text-xs';
+const inputClass =
+  'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-blue-800 focus:outline-none focus:ring-1 focus:ring-blue-800';
 
-/* ---------- Collapsible preview + editor for one trainer ---------- */
+const cellInput =
+  'w-full min-w-[84px] rounded border border-slate-300 bg-white p-1.5 text-xs text-slate-900';
 
-function TrainerPreview({
-  trainer, // effective trainer (edited draft, or the parsed original)
-  isEdited,
-  college,
-  paymentDays,
-  email,
-  onChange, // (updater) => void, where updater receives a cloned trainer
-  onReset,
-}) {
-  const [open, setOpen] = useState(false);
-  const [editing, setEditing] = useState(false);
+const sectionLabel =
+  'text-[11px] font-bold uppercase tracking-wider text-slate-500';
 
-  const html = buildScheduleHtml(trainer, college, paymentDays || '___');
+const initials = (name) =>
+  String(name || '?')
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0].toUpperCase())
+    .join('');
 
-  const srcDoc = `<!doctype html><html><body style="margin:12px;background:#ffffff;">${html}</body></html>`;
+/* ---------- Modify-mail editor for one trainer ---------- */
 
+function TrainerEditor({ trainer, onChange, onReset, isEdited }) {
   const setField = (field, value) =>
     onChange((t) => {
       t[field] = value;
@@ -242,216 +233,160 @@ function TrainerPreview({
     });
 
   return (
-    <div className="rounded-lg border">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
-        aria-expanded={open}
-      >
-        <span className="min-w-0">
-          <span className="block font-medium">{trainer.name}</span>
-          <span className="block truncate text-xs text-gray-500">
-            {email || 'No email resolved'}
-            {isEdited && (
-              <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-amber-800">
-                Edited
-              </span>
-            )}
-          </span>
-        </span>
-        <span className="text-sm text-blue-800">
-          {open ? 'Hide preview ▲' : 'Show preview ▼'}
-        </span>
-      </button>
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-xs text-slate-600">
+          Changes apply only to this trainer&apos;s email. College details are
+          edited in the sidebar.
+        </p>
+        {isEdited && (
+          <button
+            type="button"
+            onClick={onReset}
+            className="text-sm font-medium text-red-700"
+          >
+            Reset to sheet values
+          </button>
+        )}
+      </div>
 
-      {open && (
-        <div className="space-y-4 border-t p-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setEditing((v) => !v)}
-              className="rounded-lg border border-blue-900 px-3 py-1.5 text-sm font-medium text-blue-900"
-            >
-              {editing ? 'Done editing' : 'Modify mail'}
-            </button>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        {[
+          ['domain', 'Domain'],
+          ['costPerHour', 'Cost / hour'],
+          ['costPerDay', 'Cost / day'],
+        ].map(([field, label]) => (
+          <label key={field} className="text-xs font-semibold text-slate-600">
+            {label}
+            <input
+              type="text"
+              value={trainer[field] ?? ''}
+              onChange={(e) => setField(field, e.target.value)}
+              className={`${inputClass} mt-1`}
+            />
+          </label>
+        ))}
+      </div>
 
-            {isEdited && (
-              <button
-                type="button"
-                onClick={onReset}
-                className="text-sm text-red-600"
-              >
-                Reset to sheet values
-              </button>
-            )}
-          </div>
-
-          {editing && (
-            <div className="space-y-4 rounded-lg bg-gray-50 p-3">
-              <p className="text-xs text-gray-600">
-                Changes apply only to this trainer&apos;s email. College
-                name, address and project code are edited in the Assignment
-                details section above.
-              </p>
-
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                {[
-                  ['domain', 'Domain'],
-                  ['costPerHour', 'Cost / hour'],
-                  ['costPerDay', 'Cost / day'],
-                ].map(([field, label]) => (
-                  <label
-                    key={field}
-                    className="text-xs font-medium text-gray-600"
+      <div>
+        <p className={`${sectionLabel} mb-2`}>Schedule rows</p>
+        <div className="overflow-x-auto rounded-lg border border-slate-200">
+          <table className="w-full border-collapse text-xs">
+            <thead>
+              <tr className="bg-slate-50">
+                {SCHEDULE_FIELDS.map(([, label]) => (
+                  <th
+                    key={label}
+                    className="px-2 py-2 text-left font-semibold text-slate-600"
                   >
                     {label}
-                    <input
-                      type="text"
-                      value={trainer[field] ?? ''}
-                      onChange={(e) => setField(field, e.target.value)}
-                      className="mt-1 w-full rounded border p-2 text-sm"
-                    />
-                  </label>
+                  </th>
                 ))}
-              </div>
-
-              <div>
-                <p className="mb-2 text-xs font-semibold uppercase text-gray-600">
-                  Schedule rows
-                </p>
-                <div className="overflow-x-auto">
-                  <table className="w-full border-collapse text-xs">
-                    <thead>
-                      <tr>
-                        {SCHEDULE_FIELDS.map(([, label]) => (
-                          <th
-                            key={label}
-                            className="px-1 pb-1 text-left font-medium text-gray-500"
-                          >
-                            {label}
-                          </th>
-                        ))}
-                        <th />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {trainer.rows.map((row, index) => (
-                        <tr key={index}>
-                          {SCHEDULE_FIELDS.map(([field, label]) => (
-                            <td key={field} className="p-1">
-                              <input
-                                type="text"
-                                aria-label={`${label} row ${index + 1}`}
-                                value={row[field] ?? ''}
-                                onChange={(e) =>
-                                  setRowField(index, field, e.target.value)
-                                }
-                                className={cellInput}
-                              />
-                            </td>
-                          ))}
-                          <td className="p-1">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                onChange((t) => {
-                                  t.rows.splice(index, 1);
-                                })
-                              }
-                              className="text-red-600"
-                              aria-label={`Remove schedule row ${index + 1}`}
-                            >
-                              ✕
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <button
-                  type="button"
-                  onClick={() =>
-                    onChange((t) => {
-                      t.rows.push(
-                        Object.fromEntries(
-                          SCHEDULE_FIELDS.map(([field]) => [field, ''])
-                        )
-                      );
-                    })
-                  }
-                  className="mt-2 text-sm text-blue-800"
-                >
-                  + Add schedule row
-                </button>
-              </div>
-
-              <div>
-                <p className="mb-2 text-xs font-semibold uppercase text-gray-600">
-                  Summary rows
-                </p>
-                <div className="space-y-2">
-                  {trainer.summary.map((item, index) => (
-                    <div key={index} className="flex items-center gap-2">
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {trainer.rows.map((row, index) => (
+                <tr key={index} className="border-t border-slate-200">
+                  {SCHEDULE_FIELDS.map(([field, label]) => (
+                    <td key={field} className="p-1">
                       <input
                         type="text"
-                        aria-label={`Particular ${index + 1}`}
-                        placeholder="Particular"
-                        value={item.particular ?? ''}
+                        aria-label={`${label} row ${index + 1}`}
+                        value={row[field] ?? ''}
                         onChange={(e) =>
-                          setSummaryField(index, 'particular', e.target.value)
+                          setRowField(index, field, e.target.value)
                         }
                         className={cellInput}
                       />
-                      <input
-                        type="text"
-                        aria-label={`Total ${index + 1}`}
-                        placeholder="Total"
-                        value={item.total ?? ''}
-                        onChange={(e) =>
-                          setSummaryField(index, 'total', e.target.value)
-                        }
-                        className={cellInput}
-                      />
-                      <button
-                        type="button"
-                        onClick={() =>
-                          onChange((t) => {
-                            t.summary.splice(index, 1);
-                          })
-                        }
-                        className="text-red-600"
-                        aria-label={`Remove summary row ${index + 1}`}
-                      >
-                        ✕
-                      </button>
-                    </div>
+                    </td>
                   ))}
-                </div>
-                <button
-                  type="button"
-                  onClick={() =>
-                    onChange((t) => {
-                      t.summary.push({ particular: '', total: '' });
-                    })
-                  }
-                  className="mt-2 text-sm text-blue-800"
-                >
-                  + Add summary row
-                </button>
-              </div>
-            </div>
-          )}
-
-          <iframe
-            title={`Email preview for ${trainer.name}`}
-            srcDoc={srcDoc}
-            sandbox=""
-            className="h-[520px] w-full rounded-lg border bg-white"
-          />
+                  <td className="p-1">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onChange((t) => {
+                          t.rows.splice(index, 1);
+                        })
+                      }
+                      className="px-2 text-red-700"
+                      aria-label={`Remove schedule row ${index + 1}`}
+                    >
+                      ✕
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
-      )}
+        <button
+          type="button"
+          onClick={() =>
+            onChange((t) => {
+              t.rows.push(
+                Object.fromEntries(SCHEDULE_FIELDS.map(([field]) => [field, '']))
+              );
+            })
+          }
+          className="mt-2 text-sm font-medium text-blue-900"
+        >
+          + Add schedule row
+        </button>
+      </div>
+
+      <div>
+        <p className={`${sectionLabel} mb-2`}>Summary rows</p>
+        <div className="space-y-2">
+          {trainer.summary.map((item, index) => (
+            <div key={index} className="flex items-center gap-2">
+              <input
+                type="text"
+                aria-label={`Particular ${index + 1}`}
+                placeholder="Particular"
+                value={item.particular ?? ''}
+                onChange={(e) =>
+                  setSummaryField(index, 'particular', e.target.value)
+                }
+                className={cellInput}
+              />
+              <input
+                type="text"
+                aria-label={`Total ${index + 1}`}
+                placeholder="Total"
+                value={item.total ?? ''}
+                onChange={(e) =>
+                  setSummaryField(index, 'total', e.target.value)
+                }
+                className={cellInput}
+              />
+              <button
+                type="button"
+                onClick={() =>
+                  onChange((t) => {
+                    t.summary.splice(index, 1);
+                  })
+                }
+                className="px-2 text-red-700"
+                aria-label={`Remove summary row ${index + 1}`}
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={() =>
+            onChange((t) => {
+              t.summary.push({ particular: '', total: '' });
+            })
+          }
+          className="mt-2 text-sm font-medium text-blue-900"
+        >
+          + Add summary row
+        </button>
+      </div>
     </div>
   );
 }
@@ -466,6 +401,9 @@ export default function TrainerScheduleEmail() {
   const [drafts, setDrafts] = useState({}); // trainer name -> edited copy
   const [firebaseTrainers, setFirebaseTrainers] = useState([]);
   const [selected, setSelected] = useState([]);
+  const [activeName, setActiveName] = useState('');
+  const [tab, setTab] = useState('preview'); // 'preview' | 'modify'
+  const [editCollege, setEditCollege] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [college, setCollege] = useState(EMPTY_COLLEGE);
@@ -496,16 +434,22 @@ export default function TrainerScheduleEmail() {
     loadTrainers();
   }, []);
 
+  const resetSheetState = () => {
+    setTrainers([]);
+    setDrafts({});
+    setSelected([]);
+    setActiveName('');
+    setTab('preview');
+    setCollege(EMPTY_COLLEGE);
+  };
+
   const handleFile = async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
     setMessage('');
-    setTrainers([]);
-    setDrafts({});
-    setSelected([]);
     setSheetName('');
-    setCollege(EMPTY_COLLEGE);
+    resetSheetState();
 
     try {
       const data = await file.arrayBuffer();
@@ -523,15 +467,10 @@ export default function TrainerScheduleEmail() {
 
   const handleSheetChange = (name) => {
     setSheetName(name);
-    setSelected([]);
-    setDrafts({});
     setMessage('');
+    resetSheetState();
 
-    if (!workbook || !name) {
-      setTrainers([]);
-      setCollege(EMPTY_COLLEGE);
-      return;
-    }
+    if (!workbook || !name) return;
 
     try {
       const sheet = workbook.Sheets[name];
@@ -548,6 +487,7 @@ export default function TrainerScheduleEmail() {
 
       setCollege(extractedCollege);
       setTrainers(extracted);
+      setActiveName(extracted[0]?.name ?? '');
 
       const missing = Object.entries(COLLEGE_FIELD_LABELS)
         .filter(([field]) => !extractedCollege[field])
@@ -561,15 +501,14 @@ export default function TrainerScheduleEmail() {
         setMessage(
           `Found ${extracted.length} trainers, but could not find ${missing.join(
             ', '
-          )} in the sheet. You can type the missing value(s) in the Assignment details section.`
+          )} in the sheet. Type the missing value(s) in the College details section.`
         );
       } else {
         setMessage(`Found ${extracted.length} trainers.`);
       }
     } catch (error) {
       console.error(error);
-      setTrainers([]);
-      setCollege(EMPTY_COLLEGE);
+      resetSheetState();
       setMessage('Unable to parse the selected worksheet.');
     }
   };
@@ -578,7 +517,7 @@ export default function TrainerScheduleEmail() {
     const matches = firebaseTrainers.filter(
       (trainer) =>
         normalize(trainer.name) === normalize(name) &&
-        /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trainer.email || '')
+        EMAIL_REGEX.test(trainer.email || '')
     );
 
     return matches.length === 1 ? matches[0].email : '';
@@ -635,8 +574,9 @@ export default function TrainerScheduleEmail() {
 
     if (!collegeComplete) {
       setMessage(
-        'College Name, Address and Project Code are all required. Fill the missing value(s) in Assignment details.'
+        'College Name, Address and Project Code are all required. Fill the missing value(s) in College details.'
       );
+      setEditCollege(true);
       return;
     }
 
@@ -654,9 +594,7 @@ export default function TrainerScheduleEmail() {
       return;
     }
 
-    const unresolved = chosen.filter(
-      (trainer) => !resolveEmail(trainer.name)
-    );
+    const unresolved = chosen.filter((trainer) => !resolveEmail(trainer.name));
 
     if (unresolved.length) {
       setMessage(
@@ -718,202 +656,360 @@ export default function TrainerScheduleEmail() {
     }
   };
 
-  const selectedTrainers = trainers.filter((t) =>
-    selected.includes(t.name)
-  );
+  /* ---------- Derived values for the active trainer ---------- */
+
+  const activeOriginal =
+    trainers.find((t) => t.name === activeName) ?? trainers[0] ?? null;
+  const active = activeOriginal ? effectiveTrainer(activeOriginal) : null;
+  const activeEmail = active ? resolveEmail(active.name) : '';
+  const activeDays = active ? paymentDays[active.name] : '';
+
+  const previewDoc = active
+    ? `<!doctype html><html><body style="margin:12px;background:#ffffff;">${buildScheduleHtml(
+        active,
+        college,
+        activeDays || '___'
+      )}</body></html>`
+    : '';
+
+  const showCollegeEditor = editCollege || (sheetName && !collegeComplete);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <div>
-        <h2 className="text-xl font-semibold text-gray-800">
+        <h2 className="text-xl font-semibold text-slate-900">
           Trainer Schedule Emails
         </h2>
-        <p className="mt-1 text-sm text-gray-600">
-          Upload a schedule workbook, select its worksheet, preview or edit
-          each email, and send the selected trainers their schedules.
+        <p className="mt-1 text-sm text-slate-600">
+          Upload a schedule workbook, pick a trainer, preview or edit their
+          email, then send.
         </p>
       </div>
 
-      <section className="rounded-xl border bg-white p-5 space-y-4">
-        <label className="block text-sm font-medium">
-          Upload Excel workbook
-          <input
-            type="file"
-            accept=".xlsx,.xls"
-            onChange={handleFile}
-            className="mt-2 block w-full text-sm"
-          />
-        </label>
+      <div className="flex min-h-[680px] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white lg:flex-row">
+        {/* ================= Left sidebar ================= */}
+        <aside className="flex w-full flex-col gap-5 border-b border-slate-200 bg-slate-50 p-4 lg:w-[340px] lg:shrink-0 lg:border-b-0 lg:border-r">
+          {/* Upload */}
+          <section className="space-y-3">
+            <p className={sectionLabel}>Workbook</p>
 
-        {fileName && (
-          <p className="text-sm text-gray-600">File: {fileName}</p>
-        )}
+            <label className="block text-sm font-medium text-slate-800">
+              <span className="sr-only">Upload Excel workbook</span>
+              <input
+                type="file"
+                accept=".xlsx,.xls"
+                onChange={handleFile}
+                className="block w-full text-sm text-slate-700 file:mr-3 file:rounded-lg file:border-0 file:bg-blue-900 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-white"
+              />
+            </label>
 
-        {workbook && (
-          <label className="block text-sm font-medium">
-            Select worksheet
-            <select
-              value={sheetName}
-              onChange={(event) => handleSheetChange(event.target.value)}
-              className="mt-2 w-full rounded-lg border p-3"
-            >
-              <option value="">Choose a worksheet</option>
-              {workbook.SheetNames.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
-      </section>
+            {fileName && (
+              <p className="truncate text-xs text-slate-600">{fileName}</p>
+            )}
 
-      {sheetName && (
-        <section className="rounded-xl border bg-white p-5 space-y-3">
-          <h3 className="font-semibold">Assignment details (from sheet)</h3>
-          <p className="text-xs text-gray-500">
-            Read from the sheet. Edit any value here if it is wrong; it will
-            be used in every email.
-          </p>
-
-          <div className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
-            {Object.entries(COLLEGE_FIELD_LABELS).map(([field, label]) => (
-              <label
-                key={field}
-                className={`text-xs text-gray-500 ${
-                  field === 'address' ? 'sm:col-span-2' : ''
-                }`}
-              >
-                {label}
-                <input
-                  type="text"
-                  value={college[field]}
-                  onChange={(e) => updateCollege(field, e.target.value)}
-                  placeholder={`${label} not found in sheet`}
-                  className={`mt-1 w-full rounded-lg border p-2 text-sm font-medium text-gray-900 ${
-                    college[field].trim() ? '' : 'border-red-400'
-                  }`}
-                />
-              </label>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {trainers.length > 0 && (
-        <section className="rounded-xl border bg-white p-5">
-          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-            <h3 className="font-semibold">Trainers ({trainers.length})</h3>
-
-            <button
-              type="button"
-              className="text-sm text-blue-800"
-              onClick={() =>
-                setSelected(
-                  selected.length === trainers.length
-                    ? []
-                    : trainers.map((t) => t.name)
-                )
-              }
-            >
-              {selected.length === trainers.length
-                ? 'Deselect all'
-                : 'Select all'}
-            </button>
-          </div>
-
-          <div className="space-y-3">
-            {trainers.map((trainer) => {
-              const email = resolveEmail(trainer.name);
-
-              return (
-                <div
-                  key={trainer.name}
-                  className="flex flex-wrap items-start gap-3 rounded-lg border p-3"
+            {workbook && (
+              <label className="block text-xs font-semibold text-slate-600">
+                Worksheet
+                <select
+                  value={sheetName}
+                  onChange={(event) => handleSheetChange(event.target.value)}
+                  className={`${inputClass} mt-1`}
                 >
-                  <label className="flex min-w-0 flex-1 items-start gap-3">
-                    <input
-                      type="checkbox"
-                      checked={selected.includes(trainer.name)}
-                      onChange={() => toggleTrainer(trainer.name)}
-                      className="mt-1"
-                    />
+                  <option value="">Choose a worksheet</option>
+                  {workbook.SheetNames.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </section>
 
-                    <span className="min-w-0 flex-1">
-                      <span className="block font-medium">{trainer.name}</span>
-                      <span className="block text-sm text-gray-500">
-                        {trainer.domain || 'Domain not specified'}
-                        {' · '}
-                        {trainer.rows.length} schedule rows
-                        {' · '}
-                        {trainer.summary.length} summary rows
-                      </span>
-                      <span
-                        className={`block text-xs ${
-                          email ? 'text-green-700' : 'text-red-600'
-                        }`}
+          {/* College details */}
+          {sheetName && (
+            <section className="space-y-2">
+              <div className="flex items-center justify-between">
+                <p className={sectionLabel}>College details</p>
+                {collegeComplete && (
+                  <button
+                    type="button"
+                    onClick={() => setEditCollege((v) => !v)}
+                    className="text-xs font-semibold text-blue-900"
+                  >
+                    {editCollege ? 'Done' : 'Edit'}
+                  </button>
+                )}
+              </div>
+
+              {showCollegeEditor ? (
+                <div className="space-y-2 rounded-lg border border-slate-200 bg-white p-3">
+                  {Object.entries(COLLEGE_FIELD_LABELS).map(
+                    ([field, label]) => (
+                      <label
+                        key={field}
+                        className="block text-xs font-semibold text-slate-600"
                       >
-                        {email || 'Email missing or name match ambiguous'}
-                      </span>
-                    </span>
-                  </label>
-
-                  <label className="w-40 text-xs font-medium text-gray-600">
-                    Payment cycle (days)
-                    <input
-                      type="number"
-                      min="1"
-                      step="1"
-                      value={paymentDays[trainer.name] ?? ''}
-                      onChange={(event) =>
-                        setPaymentDays((previous) => ({
-                          ...previous,
-                          [trainer.name]: event.target.value,
-                        }))
-                      }
-                      placeholder="30"
-                      className="mt-1 w-full rounded-lg border p-2 text-sm"
-                    />
-                  </label>
+                        {label}
+                        <input
+                          type="text"
+                          value={college[field]}
+                          onChange={(e) => updateCollege(field, e.target.value)}
+                          placeholder={`${label} not found in sheet`}
+                          className={`${inputClass} mt-1 ${
+                            college[field].trim() ? '' : 'border-red-400'
+                          }`}
+                        />
+                      </label>
+                    )
+                  )}
                 </div>
-              );
-            })}
-          </div>
-
-          {selectedTrainers.length > 0 && (
-            <div className="mt-6 space-y-3">
-              <h3 className="font-semibold">
-                Email previews ({selectedTrainers.length})
-              </h3>
-
-              {selectedTrainers.map((trainer) => (
-                <TrainerPreview
-                  key={trainer.name}
-                  trainer={effectiveTrainer(trainer)}
-                  isEdited={Boolean(drafts[trainer.name])}
-                  college={college}
-                  paymentDays={paymentDays[trainer.name]}
-                  email={resolveEmail(trainer.name)}
-                  onChange={(updater) => updateDraft(trainer.name, updater)}
-                  onReset={() => resetDraft(trainer.name)}
-                />
-              ))}
-            </div>
+              ) : (
+                <div className="rounded-lg border border-slate-200 bg-white p-3 text-xs leading-relaxed text-slate-600">
+                  <p className="text-sm font-semibold text-slate-900">
+                    {college.name}
+                  </p>
+                  <p>{college.address}</p>
+                  <p>
+                    Project{' '}
+                    <span className="font-semibold text-blue-900">
+                      {college.code}
+                    </span>
+                  </p>
+                </div>
+              )}
+            </section>
           )}
 
-          <button
-            type="button"
-            onClick={sendEmails}
-            disabled={!selected.length || loading || !collegeComplete}
-            className={`${buttonClass} mt-5 bg-blue-900 text-white`}
-          >
-            {loading ? 'Sending...' : `Send emails (${selected.length})`}
-          </button>
-        </section>
-      )}
+          {/* Trainer list */}
+          {trainers.length > 0 && (
+            <section className="flex min-h-0 flex-1 flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <p className={sectionLabel}>
+                  Trainers · {selected.length} of {trainers.length}
+                </p>
+                <button
+                  type="button"
+                  className="text-xs font-semibold text-blue-900"
+                  onClick={() =>
+                    setSelected(
+                      selected.length === trainers.length
+                        ? []
+                        : trainers.map((t) => t.name)
+                    )
+                  }
+                >
+                  {selected.length === trainers.length
+                    ? 'Deselect all'
+                    : 'Select all'}
+                </button>
+              </div>
+
+              <ul className="max-h-[460px] space-y-2 overflow-y-auto pr-1">
+                {trainers.map((original) => {
+                  const trainer = effectiveTrainer(original);
+                  const email = resolveEmail(trainer.name);
+                  const isActive = active?.name === trainer.name;
+                  const isChecked = selected.includes(trainer.name);
+                  const daysMissing =
+                    isChecked &&
+                    !(Number(paymentDays[trainer.name]) > 0);
+
+                  return (
+                    <li
+                      key={trainer.name}
+                      className={`flex items-start gap-3 rounded-lg border p-3 ${
+                        isActive
+                          ? 'border-blue-800 bg-blue-50'
+                          : 'border-slate-200 bg-white'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => toggleTrainer(trainer.name)}
+                        aria-label={`Include ${trainer.name} in send`}
+                        className="mt-1 h-4 w-4 shrink-0"
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveName(trainer.name);
+                          setTab('preview');
+                        }}
+                        aria-current={isActive}
+                        className="min-w-0 flex-1 text-left"
+                      >
+                        <span className="flex items-center gap-2">
+                          <span className="truncate text-sm font-semibold text-slate-900">
+                            {trainer.name}
+                          </span>
+                          {drafts[trainer.name] && (
+                            <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-900">
+                              Edited
+                            </span>
+                          )}
+                        </span>
+
+                        {/* Per-trainer info line from the Excel sheet */}
+                        <span className="mt-0.5 block text-xs text-slate-600">
+                          {trainer.domain || 'Domain not specified'}
+                          {' · '}
+                          {trainer.rows.length} schedule rows
+                          {' · '}
+                          {trainer.summary.length} summary rows
+                        </span>
+
+                        <span
+                          className={`mt-0.5 block text-xs font-medium ${
+                            email ? 'text-green-800' : 'text-red-700'
+                          }`}
+                        >
+                          {email || 'Email missing or name match ambiguous'}
+                        </span>
+
+                        {daysMissing && (
+                          <span className="mt-0.5 block text-xs font-medium text-amber-800">
+                            Payment days needed
+                          </span>
+                        )}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          )}
+        </aside>
+
+        {/* ================= Right pane ================= */}
+        <main className="flex min-w-0 flex-1 flex-col">
+          {active ? (
+            <>
+              {/* Header */}
+              <div className="flex flex-wrap items-center gap-3 border-b border-slate-200 px-5 py-4">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-lg font-semibold text-slate-900">
+                    {active.name}
+                  </p>
+                  <p
+                    className={`truncate text-xs font-medium ${
+                      activeEmail ? 'text-green-800' : 'text-red-700'
+                    }`}
+                  >
+                    {activeEmail ||
+                      'Email missing or name match ambiguous'}
+                  </p>
+                  <p className="text-xs text-slate-600">
+                    {active.domain || 'Domain not specified'}
+                    {' · '}
+                    {active.rows.length} schedule rows
+                    {' · '}
+                    {active.summary.length} summary rows
+                  </p>
+                </div>
+
+                <div
+                  className="flex rounded-lg bg-slate-100 p-1"
+                  role="group"
+                  aria-label="Preview or modify"
+                >
+                  {[
+                    ['preview', 'Preview'],
+                    ['modify', 'Modify mail'],
+                  ].map(([key, label]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      aria-pressed={tab === key}
+                      onClick={() => setTab(key)}
+                      className={`rounded-md px-4 py-2 text-sm font-semibold ${
+                        tab === key
+                          ? 'bg-white text-slate-900 shadow-sm'
+                          : 'text-slate-600'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Body */}
+              <div className="flex-1 overflow-y-auto bg-slate-100 p-5">
+                {tab === 'preview' ? (
+                  <iframe
+                    title={`Email preview for ${active.name}`}
+                    srcDoc={previewDoc}
+                    sandbox=""
+                    className="h-[560px] w-full rounded-lg border border-slate-200 bg-white"
+                  />
+                ) : (
+                  <div className="rounded-lg border border-slate-200 bg-white p-5">
+                    <TrainerEditor
+                      trainer={active}
+                      isEdited={Boolean(drafts[active.name])}
+                      onChange={(updater) => updateDraft(active.name, updater)}
+                      onReset={() => resetDraft(active.name)}
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="flex flex-wrap items-center gap-4 border-t border-slate-200 px-5 py-3">
+                <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">
+                  Payment cycle (days) for {active.name}
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={activeDays ?? ''}
+                    onChange={(event) =>
+                      setPaymentDays((previous) => ({
+                        ...previous,
+                        [active.name]: event.target.value,
+                      }))
+                    }
+                    placeholder="30"
+                    className="w-20 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm text-slate-900"
+                  />
+                </label>
+
+                {!selected.includes(active.name) && (
+                  <button
+                    type="button"
+                    onClick={() => toggleTrainer(active.name)}
+                    className="text-sm font-semibold text-blue-900"
+                  >
+                    + Include in send
+                  </button>
+                )}
+
+                <span className="flex-1" />
+
+                <button
+                  type="button"
+                  onClick={sendEmails}
+                  disabled={!selected.length || loading || !collegeComplete}
+                  className="min-h-[44px] rounded-lg bg-blue-900 px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
+                >
+                  {loading ? 'Sending...' : `Send emails (${selected.length})`}
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="flex flex-1 items-center justify-center p-10 text-center text-sm text-slate-600">
+              Upload a workbook and choose a worksheet to see trainer emails
+              here.
+            </div>
+          )}
+        </main>
+      </div>
 
       {message && (
-        <p role="status" className="text-sm text-gray-700">
+        <p role="status" className="text-sm text-slate-700">
           {message}
         </p>
       )}
