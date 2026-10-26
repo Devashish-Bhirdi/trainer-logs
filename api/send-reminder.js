@@ -21,7 +21,7 @@ export async function sendRemindersCore({ trainers, subject, customMessage, port
   });
 
   const emailSubject = subject || `Training Log Reminder – ${dateStr}`;
-  const actionUrl = portalUrl || 'https://gryphonacademy.co.in';
+  const actionUrl = 'https://gryphonacademy.co.in/closure/';
 
   // Prepare batch items
   const batchEmails = validTrainers.map(trainer => {
