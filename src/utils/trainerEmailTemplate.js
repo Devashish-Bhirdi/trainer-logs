@@ -1,5 +1,6 @@
-// Shared by the React preview and the /api/send-trainer-schedule handler,
-// so the preview is always identical to the email that gets sent.
+// Builds the trainer assignment email.
+// Used by the React preview and by the send flow, so the preview is always
+// identical to the email that gets sent.
 
 // Change these later when the real link is ready
 export const TRAINER_LOGS_LINK = 'https://gryphonacademy.co.in/closure/';
@@ -12,6 +13,10 @@ export const escapeHtml = (value) =>
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
+
+// Subject line used when the email is sent
+export const buildSubject = (college) =>
+  `Assignment details – ${college.name} (${college.code})`;
 
 /* ---------- Inline styles (email clients ignore most CSS classes) ---------- */
 
@@ -32,6 +37,8 @@ const S = {
 
 /* ---------- Content blocks ---------- */
 
+// The text of item 1 is only a fallback: when the trainer has picked topics,
+// buildTopics() renders them instead.
 const EXPECTATIONS = [
   ['Topics to be covered', 'Please confirm the topics for this program.'],
   [
@@ -48,7 +55,7 @@ const EXPECTATIONS = [
   ],
   [
     'Reporting',
-    'As a freelancer trainer, we request you to provide periodic progress reports highlighting the topics covered, feedback received,  Attendance, and any adjustments made to the training program. This will enable us to stay updated and ensure a smooth collaboration throughout the assignment.',
+    'As a freelancer trainer, we request you to provide periodic progress reports highlighting the topics covered, feedback received, attendance, and any adjustments made to the training program. This will enable us to stay updated and ensure a smooth collaboration throughout the assignment.',
   ],
   [
     'SOP',
@@ -142,6 +149,48 @@ function buildSummaryTable(summary) {
     </table>`;
 }
 
+// topics: [{ topic, module, lessons: [string] }]
+// Rendered grouped by topic, then module, then lessons.
+function buildTopics(topics) {
+  if (!Array.isArray(topics) || topics.length === 0) {
+    return `<p style="${S.p}">Please confirm the topics for this program.</p>`;
+  }
+
+  const byTopic = new Map();
+  topics.forEach((t) => {
+    if (!byTopic.has(t.topic)) byTopic.set(t.topic, []);
+    byTopic.get(t.topic).push(t);
+  });
+
+  const items = [...byTopic.entries()]
+    .map(([topic, modules]) => {
+      const moduleItems = modules
+        .map((m) => {
+          const lessons = (Array.isArray(m.lessons) ? m.lessons : [])
+            .map((l) => `<li>${escapeHtml(l)}</li>`)
+            .join('');
+
+          return `
+          <li style="margin:0 0 4px;">
+            ${escapeHtml(m.module)}
+            <ul style="margin:2px 0 0;padding-left:18px;">${lessons}</ul>
+          </li>`;
+        })
+        .join('');
+
+      return `
+      <li style="margin:0 0 8px;">
+        <strong>${escapeHtml(topic)}</strong>
+        <ul style="margin:4px 0 0;padding-left:18px;">${moduleItems}</ul>
+      </li>`;
+    })
+    .join('');
+
+  return `<ul style="margin:0 0 10px;padding-left:18px;">${items}</ul>`;
+}
+
+/* ---------- Full email ---------- */
+
 export function buildScheduleHtml(trainer, college, paymentDays) {
   const rows = Array.isArray(trainer.rows) ? trainer.rows : [];
   const summary = Array.isArray(trainer.summary) ? trainer.summary : [];
@@ -157,10 +206,16 @@ export function buildScheduleHtml(trainer, college, paymentDays) {
     ['Cost / day', trainer.costPerDay],
   ]);
 
-  const expectations = EXPECTATIONS.map(
-    ([title, text], i) =>
-      `<p style="${S.p}"><strong>${i + 1}. ${escapeHtml(title)}.</strong> ${escapeHtml(text)}</p>`
-  ).join('');
+  const expectations = EXPECTATIONS.map(([title, text], i) => {
+    const heading = `<strong>${i + 1}. ${escapeHtml(title)}.</strong>`;
+
+    // Item 1 shows the picked topics instead of the placeholder sentence
+    if (i === 0) {
+      return `<p style="${S.p}">${heading}</p>${buildTopics(trainer.topics)}`;
+    }
+
+    return `<p style="${S.p}">${heading} ${escapeHtml(text)}</p>`;
+  }).join('');
 
   const notes = NOTES.map((n) => `<li>${escapeHtml(n)}</li>`).join('');
 
