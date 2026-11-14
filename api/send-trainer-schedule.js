@@ -4,7 +4,7 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY;
 
 const FROM_EMAIL =
   process.env.RESEND_FROM_EMAIL ||
-  'Gryphon Academy <reminders@gryphonacademy.co.in>';
+  'Gryphon Academy <training.g@gryphonacademy.co.in>';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -88,6 +88,7 @@ export default async function handler(req, res) {
           chunk.map((trainer) => ({
             from: FROM_EMAIL,
             to: [trainer.email],
+            cc: ['neha.dube@gryphonacademy.co.in'],
             subject: 'Trainer Schedule Details',
             html: buildScheduleHtml(
               trainer,

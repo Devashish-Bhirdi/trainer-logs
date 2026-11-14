@@ -1,7 +1,7 @@
 // api/send-reminder.js
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'Gryphon Academy <reminders@gryphonacademy.co.in>';
+const FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'Gryphon Academy <training.g@gryphonacademy.co.in>';
 
 export async function sendRemindersCore({ trainers, subject, customMessage, portalUrl }) {
   if (!Array.isArray(trainers) || trainers.length === 0) {

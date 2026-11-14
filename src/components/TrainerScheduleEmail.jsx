@@ -671,10 +671,31 @@ export default function TrainerScheduleEmail() {
         }),
       });
 
-      const result = await response.json();
+      const responseBody = await response.text();
+      let result = null;
+
+      if (responseBody.trim()) {
+        try {
+          result = JSON.parse(responseBody);
+        } catch {
+          throw new Error(
+            `Email service returned a non-JSON response (HTTP ${response.status}). If running locally, use Vercel's dev server to serve the API route.`
+          );
+        }
+      }
 
       if (!response.ok) {
-        throw new Error(result.error || 'Unable to send emails.');
+        throw new Error(
+          result?.error ||
+            result?.message ||
+            `Email service returned an empty response (HTTP ${response.status}).`
+        );
+      }
+
+      if (!result || typeof result !== 'object') {
+        throw new Error(
+          `Email service returned an empty response (HTTP ${response.status}).`
+        );
       }
 
       setMessage(`Email request accepted for ${result.count} trainers.`);
