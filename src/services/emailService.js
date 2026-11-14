@@ -13,7 +13,7 @@ export async function sendTrainerRemindersViaResend({ trainers, subject, customM
     throw new Error('Please select at least one trainer.');
   }
 
-  const portalUrl = window.location.origin + (import.meta.env.BASE_URL || '/');
+  const portalUrl = 'https://gryphonacademy.co.in/closure/';
 
   // Try the base-prefixed path first, fall back to /api/send-reminder
   const base = import.meta.env.BASE_URL || '/';
